@@ -95,8 +95,25 @@ except Exception as e:
     model = None
 
 SYSTEM_PROMPT = (
-    "You are a concise, helpful voice assistant. "
-    "Keep answers short and conversational. If asked for code, summarize verbally."
+    "You are Yuni from YUSE (pronounced as \"use\"), a friendly, patient English instructor.\n"
+    "- We previously practiced a restaurant ordering roleplay (you were the waiter, the student was the customer).\n"
+    "- We're meeting again to repeat and improve that scenario.\n"
+    "- Default roles: YOU = waiter; STUDENT = customer. If the student says 'switch roles', then YOU = customer; STUDENT = waiter.\n"
+    "- Turn-taking: reply in 1–2 short sentences, then stop so the student can speak.\n"
+    "- Be encouraging; if needed, give tiny inline corrections in brackets.\n"
+    "- Keep vocabulary B1–B2 level, natural and conversational.\n"
+    "- If the student asks to start, begin like a real waiter greeting at a restaurant.\n"
+    "\n"
+    "Here is the exact dialogue transcript of the scenario we practiced:\n"
+    "Waiter: Good evening! Welcome to our restaurant. How many people are in your party?\n"
+    "Customer: Just one, please. Do you have a table by the window?\n"
+    "Waiter: Of course! Here's your menu. Can I get you something to drink?\n"
+    "Customer: I'll have water, please. What do you recommend for dinner?\n"
+    "Waiter: The salmon is excellent tonight, and the pasta is very popular.\n"
+    "Customer: I'll try the salmon. Is it fresh?\n"
+    "Waiter: Yes, it was caught this morning. Would you like it grilled or pan-seared?\n"
+    "Customer: Grilled, please. And a side salad.\n"
+    "Waiter: Perfect! I'll put that order in right away.\n"
 )
 
 # ----------------------------
@@ -113,6 +130,8 @@ def run_llm(user_text: str) -> str:
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        # Optional: add a compact memory of the last session so the model leans into the same scene
+        {"role": "system", "content": "Session memory: Last time we practiced ordering food; the student asked about salmon vs pasta and requested a side salad."},
         {"role": "user", "content": user_text},
     ]
     inputs = tokenizer.apply_chat_template(
@@ -122,10 +141,14 @@ def run_llm(user_text: str) -> str:
         return_tensors="pt",
     ).to(model.device)
 
+    # Provide an attention mask (no padding from chat template, but this removes warnings and is robust)
+    attention_mask = torch.ones_like(inputs)
+
     with torch.inference_mode():
         output_ids = model.generate(
             inputs,
-            max_new_tokens=256,
+            attention_mask=attention_mask,
+            max_new_tokens=128,   # a bit lower to keep responses concise
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
@@ -173,6 +196,16 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
         except Exception as e:
             print(f"STT error: {e}")
             text = "Sorry, I didn't catch that. Please try again."
+
+    # Skip LLM when STT returns empty
+    if not text or not text.strip():
+        print("Empty STT result; skipping LLM.")
+        if tts is not None:
+            for chunk in tts.stream_tts_sync("Sorry, I didn't catch that. Please try again."):
+                yield chunk
+        else:
+            yield silence_chunk(0.2)
+        return
 
     # 2) LLM
     print(f"Running LLM with input: '{text}'")
