@@ -36,7 +36,7 @@ fastrtc_ok = False
 vad_ok = False
 
 try:
-from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
+    from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
     print("✅ Voice processing ready")
     fastrtc_ok = True
 except Exception as e:
