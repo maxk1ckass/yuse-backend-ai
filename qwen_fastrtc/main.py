@@ -18,9 +18,9 @@ HF_MODEL = os.getenv("QWEN_FASTRTC_MODEL", "../models/qwen2.5-omni-7b-gptq-int4"
 
 # Check GPU availability
 if torch.cuda.is_available():
-    print(f"✅ GPU acceleration enabled ({torch.cuda.get_device_name(0)})")
+    print(f"[OK] GPU acceleration enabled ({torch.cuda.get_device_name(0)})")
 else:
-    print("⚠️  Running on CPU (GPU not available)")
+    print("[WARN] Running on CPU (GPU not available)")
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = torch.device("cuda") if USE_CUDA else torch.device("cpu")
@@ -36,11 +36,11 @@ fastrtc_ok = False
 vad_ok = False
 
 try:
-    from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
-    print("✅ Voice processing ready")
+from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
+    print("[OK] Voice processing ready")
     fastrtc_ok = True
 except Exception as e:
-    print(f"⚠️  Voice processing limited: {e}")
+    print(f"[WARN] Voice processing limited: {e}")
 
 # Try to confirm ONNX Runtime availability (GPU preferred, CPU acceptable)
 if fastrtc_ok:
@@ -48,9 +48,9 @@ if fastrtc_ok:
         # Importing onnxruntime triggers DLL checks on Windows. If it fails, we won't use VAD.
         import onnxruntime  # noqa: F401
         vad_ok = True
-        print("✅ Smart conversation mode enabled")
+        print("[OK] Smart conversation mode enabled")
     except Exception as e:
-        print(f"⚠️  Basic conversation mode: {e}")
+        print(f"[WARN] Basic conversation mode: {e}")
         vad_ok = False
 
 # ----------------------------
@@ -61,16 +61,16 @@ tts = None
 if fastrtc_ok:
     try:
         stt = get_stt_model()   # e.g., Whisper
-        print("✅ Speech recognition ready")
+        print("[OK] Speech recognition ready")
     except Exception as e:
-        print(f"⚠️  Speech recognition unavailable: {e}")
+        print(f"[WARN] Speech recognition unavailable: {e}")
         stt = None
 
     try:
         tts = get_tts_model()   # e.g., Kokoro / XTTS
-        print("✅ Voice synthesis ready")
+        print("[OK] Voice synthesis ready")
     except Exception as e:
-        print(f"⚠️  Voice synthesis unavailable: {e}")
+        print(f"[WARN] Voice synthesis unavailable: {e}")
         tts = None
 
 # ----------------------------
@@ -79,7 +79,7 @@ if fastrtc_ok:
 print(f"Loading Qwen model from: {HF_MODEL}")
 try:
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL,
         dtype=DTYPE,  # <- modern arg (replaces torch_dtype)
         device_map="auto" if USE_CUDA else None,
@@ -293,7 +293,7 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     # Check if we should respond (prevent feedback loops)
     current_time = time.time()
     if current_time - last_response_time < MIN_RESPONSE_INTERVAL:
-        print(f"⏰ Too soon since last response, ignoring audio")
+        print(f"[TIMER] Too soon since last response, ignoring audio")
         yield silence_chunk(0.2)
         return
     
@@ -301,7 +301,7 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     if conversation_state["is_first_interaction"]:
         conversation_state["is_first_interaction"] = False
         greeting_text = get_initial_greeting()
-        print(f"🎓 AI Instructor greeting: '{greeting_text}'")
+        print(f"[AI] AI Instructor greeting: '{greeting_text}'")
         if tts is not None:
             last_response_time = current_time
             for chunk in tts.stream_tts_sync(greeting_text):
