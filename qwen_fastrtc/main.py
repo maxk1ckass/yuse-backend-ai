@@ -1,96 +1,90 @@
+# main.py
 import os
 import numpy as np
-from fastapi import FastAPI
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
-from dotenv import load_dotenv
+from typing import Generator, Tuple, Optional
 
-# Load environment variables from .env file
+from fastapi import FastAPI
+from dotenv import load_dotenv
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# ----------------------------
+# Env & device
+# ----------------------------
 load_dotenv()
 
+HF_MODEL = os.getenv("QWEN_FASTRTC_MODEL", "../models/qwen2.5-omni-7b-gptq-int4")
+USE_CUDA = torch.cuda.is_available()
+DEVICE = torch.device("cuda") if USE_CUDA else torch.device("cpu")
+DTYPE = torch.float16 if USE_CUDA else torch.float32
+
 # ----------------------------
-# 1) Load models
+# Optional FastRTC & VAD deps
 # ----------------------------
-# Speech-to-text & Text-to-speech via FastRTC helpers (swap to your favorites later)
-stt = None
-tts = None
+# We try to import FastRTC & ONNX (GPU) for VAD. If anything fails, we run without VAD.
+Stream = None
+ReplyOnPause = None
+fastrtc_ok = False
+vad_ok = False
 
 try:
     from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
     print("FastRTC imported successfully")
-    
+    fastrtc_ok = True
+except Exception as e:
+    print(f"FastRTC import failed (limited WebRTC): {e}")
+
+# Try to confirm ONNX Runtime availability (GPU preferred, CPU acceptable)
+if fastrtc_ok:
     try:
-        stt = get_stt_model()   # chooses a sensible default (e.g., Whisper); see gallery
+        # Importing onnxruntime triggers DLL checks on Windows. If it fails, we won't use VAD.
+        import onnxruntime  # noqa: F401
+        vad_ok = True
+        print("onnxruntime available; VAD can be enabled.")
+    except Exception as e:
+        print(f"onnxruntime not available; VAD will be disabled: {e}")
+        vad_ok = False
+
+# ----------------------------
+# STT / TTS (optional)
+# ----------------------------
+stt = None
+tts = None
+if fastrtc_ok:
+    try:
+        stt = get_stt_model()   # e.g., Whisper
         print("STT model loaded successfully")
     except Exception as e:
         print(f"Failed to load STT model: {e}")
-        print("Falling back to a simple text input for testing...")
         stt = None
 
     try:
-        tts = get_tts_model()   # chooses a sensible default (e.g., Kokoro/XTTS)
+        tts = get_tts_model()   # e.g., Kokoro / XTTS
         print("TTS model loaded successfully")
     except Exception as e:
         print(f"Failed to load TTS model: {e}")
-        print("Falling back to text-only response for testing...")
         tts = None
-        
-except Exception as e:
-    print(f"Failed to import FastRTC: {e}")
-    print("FastRTC is not available. The service will start but WebRTC functionality will be limited.")
-    # We'll need to create dummy classes for Stream and ReplyOnPause
-    class DummyStream:
-        def __init__(self, *args, **kwargs):
-            pass
-        def mount(self, app):
-            pass
-    
-    class DummyReplyOnPause:
-        def __init__(self, *args, **kwargs):
-            pass
-    
-    Stream = DummyStream
-    ReplyOnPause = DummyReplyOnPause
 
-# Qwen text LLM (fast & simple). Use any Qwen instruct model you prefer.
-QWEN_FASTRTC_MODEL = os.getenv("QWEN_FASTRTC_MODEL", "../models/qwen2.5-omni-7b-gptq-int4")
-device = 0 if torch.cuda.is_available() else "cpu"
-
-tokenizer = None
-model = None
-
+# ----------------------------
+# Qwen LLM
+# ----------------------------
+print(f"Loading Qwen model from: {HF_MODEL}")
 try:
-    print(f"Loading Qwen model from: {QWEN_FASTRTC_MODEL}")
-    tokenizer = AutoTokenizer.from_pretrained(QWEN_FASTRTC_MODEL, trust_remote_code=True)
-    
-    # Try loading with trust_remote_code=True to use the model's own config
+    tokenizer = AutoTokenizer.from_pretrained(HF_MODEL, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        QWEN_FASTRTC_MODEL,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto" if torch.cuda.is_available() else None,
-        trust_remote_code=True
-    ).to(device if isinstance(device, str) else "cuda")
+        HF_MODEL,
+        dtype=DTYPE,  # <- modern arg (replaces torch_dtype)
+        device_map="auto" if USE_CUDA else None,
+        trust_remote_code=True,
+    )
+    # If no device_map given (CPU path), move to CPU explicitly; for GPU w/ device_map="auto" it’s already placed
+    if not USE_CUDA:
+        model = model.to(DEVICE)
     print("Qwen model loaded successfully")
 except Exception as e:
     print(f"Failed to load Qwen model: {e}")
-    print("Trying alternative loading method...")
-    
-    try:
-        # Try loading as a generic model
-        from transformers import AutoModel
-        model = AutoModel.from_pretrained(
-            QWEN_FASTRTC_MODEL,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None,
-            trust_remote_code=True
-        ).to(device if isinstance(device, str) else "cuda")
-        print("Qwen model loaded as generic model")
-    except Exception as e2:
-        print(f"Alternative loading also failed: {e2}")
-        print("The service will start but AI text generation will not be available.")
-        print("You can still test the WebRTC connection and basic API endpoints.")
-        tokenizer = None
-        model = None
+    tokenizer = None
+    model = None
 
 SYSTEM_PROMPT = (
     "You are a concise, helpful voice assistant. "
@@ -98,111 +92,110 @@ SYSTEM_PROMPT = (
 )
 
 # ----------------------------
-# 2) Define the audio->audio handler
+# Helpers
 # ----------------------------
-def respond(audio: tuple[int, np.ndarray]):
-    """
-    Called automatically after FastRTC detects the user paused speaking.
-    Input: (sample_rate, mono_int16_audio)
-    Yield: (sample_rate, mono_int16_audio) chunks for TTS streaming back.
-    """
-    # 2.1 ASR
-    if stt is None:
-        # Fallback: return a simple response indicating STT is not available
-        response_text = "Speech-to-text is not available. Please check your installation."
-        if tts is not None:
-            for chunk in tts.stream_tts_sync(response_text):
-                yield chunk
-        return
-    
-    user_text = stt.stt(audio)  # returns transcribed text
+def silence_chunk(seconds: float = 0.25, sr: int = 16000) -> Tuple[int, np.ndarray]:
+    return (sr, np.zeros(int(sr * seconds), dtype=np.int16))
+
+def run_llm(user_text: str) -> str:
     if not user_text or not user_text.strip():
-        # Say "sorry, didn't catch that" with your TTS model
-        if tts is not None:
-            for chunk in tts.stream_tts_sync("Sorry, I didn't catch that. Please try again."):
-                yield chunk
-        return
-
-    # 2.2 LLM (Qwen) — build a chat-style prompt
+        return "Sorry, I didn't catch that. Please try again."
     if model is None or tokenizer is None:
-        output_text = "AI model is not available. Please check your model installation."
-    else:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ]
-        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(model.device)
-        with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
-                max_new_tokens=256,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
-            )
-        output_text = tokenizer.decode(output_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+        return "AI model is not available. Please check your model installation."
 
-    # 2.3 TTS (stream back audio chunks)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to(model.device)
+
+    with torch.inference_mode():
+        output_ids = model.generate(
+            inputs,
+            max_new_tokens=256,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+        )
+
+    text = tokenizer.decode(output_ids[0][inputs.shape[-1]:], skip_special_tokens=True)
+    return text
+
+# ----------------------------
+# Audio pipeline
+# ----------------------------
+def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], None, None]:
+    """
+    Input:  (sample_rate:int, mono_int16_audio: np.ndarray shape [N])
+    Yields: (sample_rate:int, mono_int16_audio:int16[1,N]) chunks for TTS
+    """
+    # 1) STT
+    if stt is None:
+        text = "Speech-to-text is not available. Please check your installation."
+    else:
+        text = stt.stt(audio)
+
+    # 2) LLM
+    output_text = run_llm(text)
+
+    # 3) TTS or silence
     if tts is not None:
-        for audio_chunk in tts.stream_tts_sync(output_text):
-            # Each chunk must be (sample_rate:int, np.ndarray[int16][1, N])
-            yield audio_chunk
+        for chunk in tts.stream_tts_sync(output_text):
+            yield chunk
     else:
-        # Fallback: return silence if TTS is not available
-        print(f"TTS not available. Would have said: {output_text}")
-        # Return a short silence
-        sample_rate = 16000
-        silence = np.zeros((sample_rate,), dtype=np.int16)
-        yield (sample_rate, silence)
+        # No TTS → return brief silence (keeps pipeline valid)
+        yield silence_chunk(0.2)
 
 # ----------------------------
-# 3) Build the FastRTC stream & mount to FastAPI
+# Build Stream + FastAPI
 # ----------------------------
-# Try to use ReplyOnPause if available, otherwise create a minimal stream
-try:
-    stream = Stream(
-        handler=ReplyOnPause(respond, can_interrupt=True),
-        modality="audio",
-        mode="send-receive",
-    )
-    print("Using ReplyOnPause with VAD")
-except Exception as e:
-    print(f"ReplyOnPause failed (likely due to ONNX Runtime): {e}")
-    print("Creating minimal stream without VAD")
-    
-    # Create a minimal stream that just passes audio through
-    try:
-        from fastrtc import StreamHandlerBase
-        
-        class SimpleAudioHandler(StreamHandlerBase):
-            def __init__(self, respond_func):
-                super().__init__()
-                self.respond_func = respond_func
-            
-            def handle_audio(self, audio):
-                return self.respond_func(audio)
-        
-        stream = Stream(
-            handler=SimpleAudioHandler(respond),
-            modality="audio",
-            mode="send-receive",
-        )
-        print("Using SimpleAudioHandler")
-    except Exception as e2:
-        print(f"SimpleAudioHandler also failed: {e2}")
-        print("Creating basic stream without custom handler")
-        
-        # Last resort: create a basic stream
-        stream = Stream(
-            modality="audio",
-            mode="send-receive",
-        )
-        print("Using basic stream (no custom handler)")
-
 app = FastAPI()
-stream.mount(app)  # exposes /webrtc/offer (and /websocket/offer, etc.) on this FastAPI app  :contentReference[oaicite:3]{index=3}
 
-# Optional: a quick health check
+if fastrtc_ok:
+    try:
+        if vad_ok:
+            # Best path: VAD-enabled turn-taking w/ interruption
+            stream = Stream(
+                handler=ReplyOnPause(respond, can_interrupt=True),
+                modality="audio",
+                mode="send-receive",
+            )
+            print("Using ReplyOnPause with VAD")
+        else:
+            # No VAD → simple handler that just calls respond() per request
+            def no_vad_handler(audio):
+                try:
+                    for ch in respond(audio):
+                        yield ch
+                except Exception as ex:
+                    print(f"no_vad_handler error: {ex}")
+                    yield silence_chunk(0.2)
+
+            stream = Stream(
+                handler=no_vad_handler,
+                modality="audio",
+                mode="send-receive",
+            )
+            print("Using simple no-VAD handler")
+        stream.mount(app)  # exposes /webrtc/offer & /websocket/offer on this FastAPI app
+    except Exception as e:
+        print(f"Failed to initialize FastRTC Stream: {e}")
+        # App will still start (REST only), but no WebRTC endpoints.
+else:
+    print("FastRTC is unavailable; starting FastAPI without WebRTC endpoints.")
+
+# Health
 @app.get("/health")
 def health():
-    return {"ok": True, "model": QWEN_FASTRTC_MODEL}
+    return {
+        "ok": True,
+        "cuda": USE_CUDA,
+        "vad_enabled": bool(fastrtc_ok and vad_ok),
+        "fastrtc": bool(fastrtc_ok),
+        "model": HF_MODEL,
+    }
