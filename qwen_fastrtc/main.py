@@ -158,15 +158,7 @@ def respond(audio: tuple[int, np.ndarray]):
 # ----------------------------
 # 3) Build the FastRTC stream & mount to FastAPI
 # ----------------------------
-# Create a simple handler that doesn't require VAD
-class SimpleHandler:
-    def __init__(self, respond_func):
-        self.respond_func = respond_func
-    
-    def __call__(self, audio):
-        return self.respond_func(audio)
-
-# Try to use ReplyOnPause if available, otherwise use simple handler
+# Try to use ReplyOnPause if available, otherwise create a minimal stream
 try:
     stream = Stream(
         handler=ReplyOnPause(respond, can_interrupt=True),
@@ -176,12 +168,36 @@ try:
     print("Using ReplyOnPause with VAD")
 except Exception as e:
     print(f"ReplyOnPause failed (likely due to ONNX Runtime): {e}")
-    print("Using simple handler without VAD")
-    stream = Stream(
-        handler=SimpleHandler(respond),
-        modality="audio",
-        mode="send-receive",
-    )
+    print("Creating minimal stream without VAD")
+    
+    # Create a minimal stream that just passes audio through
+    try:
+        from fastrtc import StreamHandlerBase
+        
+        class SimpleAudioHandler(StreamHandlerBase):
+            def __init__(self, respond_func):
+                super().__init__()
+                self.respond_func = respond_func
+            
+            def handle_audio(self, audio):
+                return self.respond_func(audio)
+        
+        stream = Stream(
+            handler=SimpleAudioHandler(respond),
+            modality="audio",
+            mode="send-receive",
+        )
+        print("Using SimpleAudioHandler")
+    except Exception as e2:
+        print(f"SimpleAudioHandler also failed: {e2}")
+        print("Creating basic stream without custom handler")
+        
+        # Last resort: create a basic stream
+        stream = Stream(
+            modality="audio",
+            mode="send-receive",
+        )
+        print("Using basic stream (no custom handler)")
 
 app = FastAPI()
 stream.mount(app)  # exposes /webrtc/offer (and /websocket/offer, etc.) on this FastAPI app  :contentReference[oaicite:3]{index=3}
