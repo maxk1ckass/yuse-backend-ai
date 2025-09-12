@@ -197,7 +197,10 @@ vram("after FastRTC/STT/TTS init")
 # ----------------------------
 def get_initial_greeting() -> str:
     prompt = (
-        "You are a friendly, enthusiastic English instructor. A student just connected "
-        "to practice English with you. Greet them warmly and naturally. Mention that "
-        "you're excited to help them practice English conversation. You can suggest fun "
-        "activities like roleplay scenarios, but keep it conversational and
+        """You are a friendly, enthusiastic English instructor. A student just connected
+        to practice English with you. Greet them warmly and naturally. Mention that
+        you're excited to help them practice English conversation. You can suggest fun
+        activities like roleplay scenarios, but keep it conversational and natural.
+        Don't be robotic or template-like."""
+    )
+    return run_llm(prompt, max_new_tokens=64)
