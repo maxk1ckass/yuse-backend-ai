@@ -151,22 +151,39 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     Input:  (sample_rate:int, mono_int16_audio: np.ndarray shape [N])
     Yields: (sample_rate:int, mono_int16_audio:int16[1,N]) chunks for TTS
     """
+    print(f"=== Audio Processing Debug ===")
+    print(f"Audio shape: {audio[1].shape}, sample rate: {audio[0]}")
+    print(f"Audio duration: {len(audio[1]) / audio[0]:.2f} seconds")
+    
     # 1) STT
     if stt is None:
         text = "Speech-to-text is not available. Please check your installation."
+        print(f"STT not available, using fallback text: {text}")
     else:
-        text = stt.stt(audio)
+        print("Processing speech-to-text...")
+        try:
+            text = stt.stt(audio)
+            print(f"STT result: '{text}'")
+        except Exception as e:
+            print(f"STT error: {e}")
+            text = "Sorry, I didn't catch that. Please try again."
 
     # 2) LLM
+    print(f"Running LLM with input: '{text}'")
     output_text = run_llm(text)
+    print(f"LLM output: '{output_text}'")
 
     # 3) TTS or silence
     if tts is not None:
+        print("Generating TTS audio...")
         for chunk in tts.stream_tts_sync(output_text):
             yield chunk
     else:
+        print("TTS not available, returning silence")
         # No TTS → return brief silence (keeps pipeline valid)
         yield silence_chunk(0.2)
+    
+    print("=== End Audio Processing ===")
 
 # ----------------------------
 # Build Stream + FastAPI
