@@ -15,21 +15,11 @@ load_dotenv()
 
 HF_MODEL = os.getenv("QWEN_FASTRTC_MODEL", "../models/qwen2.5-omni-7b-gptq-int4")
 
-# Debug CUDA detection
-print("=== CUDA Debug Info ===")
-print(f"PyTorch version: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
+# Check GPU availability
 if torch.cuda.is_available():
-    print(f"CUDA version: {torch.version.cuda}")
-    print(f"CUDA device count: {torch.cuda.device_count()}")
-    print(f"Current CUDA device: {torch.cuda.current_device()}")
-    print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
-    print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    print(f"✅ GPU acceleration enabled ({torch.cuda.get_device_name(0)})")
 else:
-    print("CUDA not available - checking why...")
-    print(f"CUDA_HOME: {os.environ.get('CUDA_HOME', 'Not set')}")
-    print(f"PATH contains CUDA: {'cuda' in os.environ.get('PATH', '').lower()}")
-print("========================")
+    print("⚠️  Running on CPU (GPU not available)")
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = torch.device("cuda") if USE_CUDA else torch.device("cpu")
@@ -46,10 +36,10 @@ vad_ok = False
 
 try:
     from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
-    print("FastRTC imported successfully")
+    print("✅ Voice processing ready")
     fastrtc_ok = True
 except Exception as e:
-    print(f"FastRTC import failed (limited WebRTC): {e}")
+    print(f"⚠️  Voice processing limited: {e}")
 
 # Try to confirm ONNX Runtime availability (GPU preferred, CPU acceptable)
 if fastrtc_ok:
@@ -57,9 +47,9 @@ if fastrtc_ok:
         # Importing onnxruntime triggers DLL checks on Windows. If it fails, we won't use VAD.
         import onnxruntime  # noqa: F401
         vad_ok = True
-        print("onnxruntime available; VAD can be enabled.")
+        print("✅ Smart conversation mode enabled")
     except Exception as e:
-        print(f"onnxruntime not available; VAD will be disabled: {e}")
+        print(f"⚠️  Basic conversation mode: {e}")
         vad_ok = False
 
 # ----------------------------
@@ -70,16 +60,16 @@ tts = None
 if fastrtc_ok:
     try:
         stt = get_stt_model()   # e.g., Whisper
-        print("STT model loaded successfully")
+        print("✅ Speech recognition ready")
     except Exception as e:
-        print(f"Failed to load STT model: {e}")
+        print(f"⚠️  Speech recognition unavailable: {e}")
         stt = None
 
     try:
         tts = get_tts_model()   # e.g., Kokoro / XTTS
-        print("TTS model loaded successfully")
+        print("✅ Voice synthesis ready")
     except Exception as e:
-        print(f"Failed to load TTS model: {e}")
+        print(f"⚠️  Voice synthesis unavailable: {e}")
         tts = None
 
 # ----------------------------
@@ -153,7 +143,9 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     """
     print(f"=== Audio Processing Debug ===")
     print(f"Audio shape: {audio[1].shape}, sample rate: {audio[0]}")
-    print(f"Audio duration: {len(audio[1]) / audio[0]:.2f} seconds")
+    # Handle both 1D and 2D audio arrays
+    audio_length = audio[1].shape[-1] if len(audio[1].shape) > 1 else len(audio[1])
+    print(f"Audio duration: {audio_length / audio[0]:.2f} seconds")
     
     # 1) STT
     if stt is None:
