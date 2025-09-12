@@ -1,6 +1,7 @@
 # main.py
 import os
 import numpy as np
+import time
 from typing import Generator, Tuple, Optional
 
 from fastapi import FastAPI
@@ -136,16 +137,29 @@ def run_llm(user_text: str) -> str:
 # ----------------------------
 # Audio pipeline
 # ----------------------------
+# Track last response time to prevent feedback loops
+last_response_time = 0
+MIN_RESPONSE_INTERVAL = 2.0  # Minimum 2 seconds between responses
+
 def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], None, None]:
     """
     Input:  (sample_rate:int, mono_int16_audio: np.ndarray shape [N])
     Yields: (sample_rate:int, mono_int16_audio:int16[1,N]) chunks for TTS
     """
+    global last_response_time
+    
     print(f"=== Audio Processing Debug ===")
     print(f"Audio shape: {audio[1].shape}, sample rate: {audio[0]}")
     # Handle both 1D and 2D audio arrays
     audio_length = audio[1].shape[-1] if len(audio[1].shape) > 1 else len(audio[1])
     print(f"Audio duration: {audio_length / audio[0]:.2f} seconds")
+    
+    # Check if we should respond (prevent feedback loops)
+    current_time = time.time()
+    if current_time - last_response_time < MIN_RESPONSE_INTERVAL:
+        print(f"⏰ Too soon since last response, ignoring audio")
+        yield silence_chunk(0.2)
+        return
     
     # 1) STT
     if stt is None:
@@ -168,6 +182,7 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     # 3) TTS or silence
     if tts is not None:
         print("Generating TTS audio...")
+        last_response_time = current_time  # Update response time
         for chunk in tts.stream_tts_sync(output_text):
             yield chunk
     else:
