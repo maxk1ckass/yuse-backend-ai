@@ -36,7 +36,7 @@ fastrtc_ok = False
 vad_ok = False
 
 try:
-    from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
+from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
     print("✅ Voice processing ready")
     fastrtc_ok = True
 except Exception as e:
@@ -79,7 +79,7 @@ if fastrtc_ok:
 print(f"Loading Qwen model from: {HF_MODEL}")
 try:
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL,
         dtype=DTYPE,  # <- modern arg (replaces torch_dtype)
         device_map="auto" if USE_CUDA else None,
@@ -139,9 +139,13 @@ def run_llm(user_text: str) -> str:
 # ----------------------------
 def get_initial_greeting() -> str:
     """AI speaks first - English instructor greeting"""
-    return ("Hello! I'm your English instructor. I'm excited to practice with you today! "
-            "I have a fun roleplay scenario ready. Would you like to hear about it? "
-            "Just say 'yes' or 'tell me about it' when you're ready!")
+    # Use the LLM to generate a natural greeting
+    greeting_prompt = """You are a friendly, enthusiastic English instructor. A student just connected to practice English with you. 
+    Greet them warmly and naturally. Mention that you're excited to help them practice English conversation. 
+    You can suggest fun activities like roleplay scenarios, but keep it conversational and natural. 
+    Don't be robotic or template-like."""
+    
+    return run_llm(greeting_prompt)
 
 def get_scenario_script() -> dict:
     """Returns a sample dialogue scenario for roleplay"""
@@ -167,68 +171,95 @@ def get_scenario_script() -> dict:
     }
 
 def process_instructor_response(user_text: str) -> str:
-    """Process user input and generate appropriate instructor response"""
+    """Process user input with intelligent English instructor responses"""
     global conversation_state
     
+    # Create a smart prompt for the LLM that includes context
+    context_prompt = create_instructor_prompt(user_text, conversation_state)
+    
+    # Use the LLM to generate a natural, intelligent response
+    llm_response = run_llm(context_prompt)
+    
+    # Update conversation state based on the interaction
+    update_conversation_state(user_text, llm_response, conversation_state)
+    
+    return llm_response
+
+def create_instructor_prompt(user_text: str, state: dict) -> str:
+    """Create a contextual prompt for the English instructor AI"""
+    
+    base_prompt = """You are a friendly, patient English instructor helping a student practice conversational English. You should:
+1. Respond naturally and conversationally
+2. Be encouraging and supportive
+3. Help with vocabulary and grammar when needed
+4. Guide roleplay scenarios when appropriate
+5. Understand what the student is saying and respond meaningfully
+
+Current conversation state:"""
+    
+    if state["is_first_interaction"]:
+        return f"{base_prompt}\nThis is the first interaction. The student just connected. Greet them warmly and offer to help with English practice."
+    
+    if not state["current_scenario"]:
+        return f"""{base_prompt}
+No active scenario. The student said: "{user_text}"
+Respond naturally to what they said. If they seem interested in practice, suggest a roleplay scenario like ordering at a restaurant, asking for directions, or making small talk."""
+    
+    if state["current_scenario"] and state["scene_step"] == 0:
+        scenario = state["current_scenario"]
+        return f"""{base_prompt}
+You're about to start a roleplay scenario: {scenario['title']}
+Description: {scenario['description']}
+Your role: {state['ai_role']}
+Student's role: {state['user_role']}
+The student said: "{user_text}"
+Start the roleplay naturally as your character. Don't be rigid - respond to what they actually said while staying in character."""
+    
+    if state["current_scenario"] and state["scene_step"] > 0:
+        scenario = state["current_scenario"]
+        return f"""{base_prompt}
+You're in the middle of a roleplay scenario: {scenario['title']}
+Your role: {state['ai_role']}
+Student's role: {state['user_role']}
+Current step: {state['scene_step']}
+The student said: "{user_text}"
+Respond naturally as your character. Keep the conversation flowing. If they make mistakes, gently correct them. If they're doing well, encourage them."""
+    
+    return f"{base_prompt}\nThe student said: '{user_text}'. Respond naturally and helpfully."
+
+def update_conversation_state(user_text: str, ai_response: str, state: dict):
+    """Update conversation state based on the interaction"""
     user_text_lower = user_text.lower()
     
-    # Check if user wants to hear about the scenario
-    if any(phrase in user_text_lower for phrase in ["yes", "tell me", "scenario", "roleplay", "practice"]):
-        scenario = get_scenario_script()
-        conversation_state["current_scenario"] = scenario
+    # Check if user wants to start a scenario
+    if any(phrase in user_text_lower for phrase in ["scenario", "roleplay", "practice", "restaurant", "order"]):
+        if not state["current_scenario"]:
+            state["current_scenario"] = get_scenario_script()
+            state["ai_role"] = "waiter"
+            state["user_role"] = "customer"
+            state["scene_step"] = 0
+    
+    # Check if user is ready to begin roleplay
+    if any(phrase in user_text_lower for phrase in ["ready", "begin", "start", "let's go", "yes"]):
+        if state["current_scenario"] and state["scene_step"] == 0:
+            state["scene_step"] = 1
+    
+    # During roleplay, increment step
+    if state["current_scenario"] and state["scene_step"] > 0:
+        state["scene_step"] += 1
         
-        response = (f"Great! Today we'll practice a {scenario['title']} scenario. "
-                   f"{scenario['description']} "
-                   f"I'll be the {list(scenario['roles'].keys())[0]} and you'll be the {list(scenario['roles'].keys())[1]}. "
-                   f"Are you ready to start? Just say 'ready' or 'let's begin'!")
-        return response
+        # Check if scenario is complete
+        if state["scene_step"] >= len(state["current_scenario"]["dialogue"]):
+            state["scene_step"] = 0
+            state["current_scenario"] = None
     
-    # Check if user is ready to start
-    if any(phrase in user_text_lower for phrase in ["ready", "begin", "start", "let's go"]):
-        if conversation_state["current_scenario"]:
-            scenario = conversation_state["current_scenario"]
-            conversation_state["scene_step"] = 0
-            conversation_state["ai_role"] = list(scenario["roles"].keys())[0]
-            conversation_state["user_role"] = list(scenario["roles"].keys())[1]
-            
-            first_line = scenario["dialogue"][0]
-            response = (f"Perfect! Let's begin. I'm the {conversation_state['ai_role']} and you're the {conversation_state['user_role']}. "
-                       f"Here we go: {first_line['text']}")
-            return response
-        else:
-            return "Let me first tell you about our scenario. Would you like to hear about it?"
-    
-    # During roleplay - check if user is following the script
-    if conversation_state["current_scenario"] and conversation_state["scene_step"] > 0:
-        return process_roleplay_response(user_text)
-    
-    # Default response
-    return ("I'm here to help you practice English! Would you like to try our roleplay scenario? "
-            "Just say 'yes' to hear about it!")
+    # Check if user wants to reset or start over
+    if any(phrase in user_text_lower for phrase in ["reset", "start over", "new conversation", "clear"]):
+        state["current_scenario"] = None
+        state["scene_step"] = 0
+        state["ai_role"] = None
+        state["user_role"] = None
 
-def process_roleplay_response(user_text: str) -> str:
-    """Process responses during roleplay"""
-    global conversation_state
-    
-    scenario = conversation_state["current_scenario"]
-    current_step = conversation_state["scene_step"]
-    
-    # Check if we've completed the scenario
-    if current_step >= len(scenario["dialogue"]) - 1:
-        return ("Excellent work! We've completed the scenario. You did great! "
-                "Would you like to try it again, or would you like to practice a different scenario?")
-    
-    # Move to next step
-    conversation_state["scene_step"] += 1
-    next_line = scenario["dialogue"][conversation_state["scene_step"]]
-    
-    # If it's the AI's turn, provide the line
-    if next_line["role"] == conversation_state["ai_role"]:
-        return next_line["text"]
-    else:
-        # It's the user's turn, give them a hint
-        return (f"Great! Now it's your turn as the {conversation_state['user_role']}. "
-                f"Try responding naturally. If you need help, just ask!")
 
 # ----------------------------
 # Audio pipeline
@@ -319,11 +350,11 @@ if fastrtc_ok:
     try:
         if vad_ok:
             # Best path: VAD-enabled turn-taking w/ interruption
-            stream = Stream(
-                handler=ReplyOnPause(respond, can_interrupt=True),
-                modality="audio",
-                mode="send-receive",
-            )
+stream = Stream(
+    handler=ReplyOnPause(respond, can_interrupt=True),
+    modality="audio",
+    mode="send-receive",
+)
             print("Using ReplyOnPause with VAD")
         else:
             # No VAD → simple handler that just calls respond() per request
