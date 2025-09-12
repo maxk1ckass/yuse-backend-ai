@@ -79,7 +79,7 @@ if fastrtc_ok:
 print(f"Loading Qwen model from: {HF_MODEL}")
 try:
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL,
         dtype=DTYPE,  # <- modern arg (replaces torch_dtype)
         device_map="auto" if USE_CUDA else None,
