@@ -56,12 +56,41 @@ except Exception as e:
 QWEN_FASTRTC_MODEL = os.getenv("QWEN_FASTRTC_MODEL", "../models/qwen2.5-omni-7b-gptq-int4")
 device = 0 if torch.cuda.is_available() else "cpu"
 
-tokenizer = AutoTokenizer.from_pretrained(QWEN_FASTRTC_MODEL, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
-    QWEN_FASTRTC_MODEL,
-    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    device_map="auto" if torch.cuda.is_available() else None
-).to(device if isinstance(device, str) else "cuda")
+tokenizer = None
+model = None
+
+try:
+    print(f"Loading Qwen model from: {QWEN_FASTRTC_MODEL}")
+    tokenizer = AutoTokenizer.from_pretrained(QWEN_FASTRTC_MODEL, trust_remote_code=True)
+    
+    # Try loading with trust_remote_code=True to use the model's own config
+    model = AutoModelForCausalLM.from_pretrained(
+        QWEN_FASTRTC_MODEL,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto" if torch.cuda.is_available() else None,
+        trust_remote_code=True
+    ).to(device if isinstance(device, str) else "cuda")
+    print("Qwen model loaded successfully")
+except Exception as e:
+    print(f"Failed to load Qwen model: {e}")
+    print("Trying alternative loading method...")
+    
+    try:
+        # Try loading as a generic model
+        from transformers import AutoModel
+        model = AutoModel.from_pretrained(
+            QWEN_FASTRTC_MODEL,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else None,
+            trust_remote_code=True
+        ).to(device if isinstance(device, str) else "cuda")
+        print("Qwen model loaded as generic model")
+    except Exception as e2:
+        print(f"Alternative loading also failed: {e2}")
+        print("The service will start but AI text generation will not be available.")
+        print("You can still test the WebRTC connection and basic API endpoints.")
+        tokenizer = None
+        model = None
 
 SYSTEM_PROMPT = (
     "You are a concise, helpful voice assistant. "
@@ -95,20 +124,23 @@ def respond(audio: tuple[int, np.ndarray]):
         return
 
     # 2.2 LLM (Qwen) — build a chat-style prompt
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
-    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(model.device)
-    with torch.inference_mode():
-        output_ids = model.generate(
-            input_ids,
-            max_new_tokens=256,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
-        )
-    output_text = tokenizer.decode(output_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+    if model is None or tokenizer is None:
+        output_text = "AI model is not available. Please check your model installation."
+    else:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ]
+        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(model.device)
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids,
+                max_new_tokens=256,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+            )
+        output_text = tokenizer.decode(output_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
 
     # 2.3 TTS (stream back audio chunks)
     if tts is not None:
@@ -126,12 +158,30 @@ def respond(audio: tuple[int, np.ndarray]):
 # ----------------------------
 # 3) Build the FastRTC stream & mount to FastAPI
 # ----------------------------
-# ReplyOnPause = built-in turn-taking (VAD); speak–pause→response; supports interruption. :contentReference[oaicite:2]{index=2}
-stream = Stream(
-    handler=ReplyOnPause(respond, can_interrupt=True),
-    modality="audio",
-    mode="send-receive",
-)
+# Create a simple handler that doesn't require VAD
+class SimpleHandler:
+    def __init__(self, respond_func):
+        self.respond_func = respond_func
+    
+    def __call__(self, audio):
+        return self.respond_func(audio)
+
+# Try to use ReplyOnPause if available, otherwise use simple handler
+try:
+    stream = Stream(
+        handler=ReplyOnPause(respond, can_interrupt=True),
+        modality="audio",
+        mode="send-receive",
+    )
+    print("Using ReplyOnPause with VAD")
+except Exception as e:
+    print(f"ReplyOnPause failed (likely due to ONNX Runtime): {e}")
+    print("Using simple handler without VAD")
+    stream = Stream(
+        handler=SimpleHandler(respond),
+        modality="audio",
+        mode="send-receive",
+    )
 
 app = FastAPI()
 stream.mount(app)  # exposes /webrtc/offer (and /websocket/offer, etc.) on this FastAPI app  :contentReference[oaicite:3]{index=3}
