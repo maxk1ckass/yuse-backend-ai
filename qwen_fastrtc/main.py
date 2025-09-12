@@ -135,18 +135,123 @@ def run_llm(user_text: str) -> str:
     return text
 
 # ----------------------------
+# English Instructor Functions
+# ----------------------------
+def get_initial_greeting() -> str:
+    """AI speaks first - English instructor greeting"""
+    return ("Hello! I'm your English instructor. I'm excited to practice with you today! "
+            "I have a fun roleplay scenario ready. Would you like to hear about it? "
+            "Just say 'yes' or 'tell me about it' when you're ready!")
+
+def get_scenario_script() -> dict:
+    """Returns a sample dialogue scenario for roleplay"""
+    return {
+        "title": "Restaurant Order",
+        "description": "Practice ordering food at a restaurant",
+        "roles": {
+            "customer": "You are a customer at a nice restaurant. You want to order food and ask questions about the menu.",
+            "waiter": "You are a friendly waiter. Help the customer with their order and make recommendations."
+        },
+        "dialogue": [
+            {"role": "waiter", "text": "Good evening! Welcome to our restaurant. How many people are in your party?"},
+            {"role": "customer", "text": "Just one, please. Do you have a table by the window?"},
+            {"role": "waiter", "text": "Of course! Right this way. Here's your menu. Can I get you something to drink while you decide?"},
+            {"role": "customer", "text": "I'll have a glass of water, please. What do you recommend for dinner?"},
+            {"role": "waiter", "text": "Our salmon is excellent tonight, and the pasta is very popular. What sounds good to you?"},
+            {"role": "customer", "text": "I'll try the salmon. Is it fresh?"},
+            {"role": "waiter", "text": "Yes, it was caught this morning. Would you like it grilled or pan-seared?"},
+            {"role": "customer", "text": "Grilled, please. And could I have a side salad?"},
+            {"role": "waiter", "text": "Perfect! I'll put that order in right away. Anything else I can get you?"},
+            {"role": "customer", "text": "That's all for now, thank you!"}
+        ]
+    }
+
+def process_instructor_response(user_text: str) -> str:
+    """Process user input and generate appropriate instructor response"""
+    global conversation_state
+    
+    user_text_lower = user_text.lower()
+    
+    # Check if user wants to hear about the scenario
+    if any(phrase in user_text_lower for phrase in ["yes", "tell me", "scenario", "roleplay", "practice"]):
+        scenario = get_scenario_script()
+        conversation_state["current_scenario"] = scenario
+        
+        response = (f"Great! Today we'll practice a {scenario['title']} scenario. "
+                   f"{scenario['description']} "
+                   f"I'll be the {list(scenario['roles'].keys())[0]} and you'll be the {list(scenario['roles'].keys())[1]}. "
+                   f"Are you ready to start? Just say 'ready' or 'let's begin'!")
+        return response
+    
+    # Check if user is ready to start
+    if any(phrase in user_text_lower for phrase in ["ready", "begin", "start", "let's go"]):
+        if conversation_state["current_scenario"]:
+            scenario = conversation_state["current_scenario"]
+            conversation_state["scene_step"] = 0
+            conversation_state["ai_role"] = list(scenario["roles"].keys())[0]
+            conversation_state["user_role"] = list(scenario["roles"].keys())[1]
+            
+            first_line = scenario["dialogue"][0]
+            response = (f"Perfect! Let's begin. I'm the {conversation_state['ai_role']} and you're the {conversation_state['user_role']}. "
+                       f"Here we go: {first_line['text']}")
+            return response
+        else:
+            return "Let me first tell you about our scenario. Would you like to hear about it?"
+    
+    # During roleplay - check if user is following the script
+    if conversation_state["current_scenario"] and conversation_state["scene_step"] > 0:
+        return process_roleplay_response(user_text)
+    
+    # Default response
+    return ("I'm here to help you practice English! Would you like to try our roleplay scenario? "
+            "Just say 'yes' to hear about it!")
+
+def process_roleplay_response(user_text: str) -> str:
+    """Process responses during roleplay"""
+    global conversation_state
+    
+    scenario = conversation_state["current_scenario"]
+    current_step = conversation_state["scene_step"]
+    
+    # Check if we've completed the scenario
+    if current_step >= len(scenario["dialogue"]) - 1:
+        return ("Excellent work! We've completed the scenario. You did great! "
+                "Would you like to try it again, or would you like to practice a different scenario?")
+    
+    # Move to next step
+    conversation_state["scene_step"] += 1
+    next_line = scenario["dialogue"][conversation_state["scene_step"]]
+    
+    # If it's the AI's turn, provide the line
+    if next_line["role"] == conversation_state["ai_role"]:
+        return next_line["text"]
+    else:
+        # It's the user's turn, give them a hint
+        return (f"Great! Now it's your turn as the {conversation_state['user_role']}. "
+                f"Try responding naturally. If you need help, just ask!")
+
+# ----------------------------
 # Audio pipeline
 # ----------------------------
 # Track last response time to prevent feedback loops
 last_response_time = 0
 MIN_RESPONSE_INTERVAL = 2.0  # Minimum 2 seconds between responses
 
+# Conversation state for English instructor
+conversation_state = {
+    "is_first_interaction": True,
+    "current_scenario": None,
+    "user_role": None,
+    "ai_role": None,
+    "scene_step": 0
+}
+
 def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], None, None]:
     """
     Input:  (sample_rate:int, mono_int16_audio: np.ndarray shape [N])
     Yields: (sample_rate:int, mono_int16_audio:int16[1,N]) chunks for TTS
     """
-    global last_response_time
+    global last_response_time, conversation_state
     
     print(f"=== Audio Processing Debug ===")
     print(f"Audio shape: {audio[1].shape}, sample rate: {audio[0]}")
@@ -159,6 +264,19 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     if current_time - last_response_time < MIN_RESPONSE_INTERVAL:
         print(f"⏰ Too soon since last response, ignoring audio")
         yield silence_chunk(0.2)
+        return
+    
+    # Special case: First interaction - AI speaks first
+    if conversation_state["is_first_interaction"]:
+        conversation_state["is_first_interaction"] = False
+        greeting_text = get_initial_greeting()
+        print(f"🎓 AI Instructor greeting: '{greeting_text}'")
+        if tts is not None:
+            last_response_time = current_time
+            for chunk in tts.stream_tts_sync(greeting_text):
+                yield chunk
+        else:
+            yield silence_chunk(0.2)
         return
     
     # 1) STT
@@ -174,10 +292,10 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
             print(f"STT error: {e}")
             text = "Sorry, I didn't catch that. Please try again."
 
-    # 2) LLM
-    print(f"Running LLM with input: '{text}'")
-    output_text = run_llm(text)
-    print(f"LLM output: '{output_text}'")
+    # 2) Process with English Instructor System
+    print(f"Processing user input: '{text}'")
+    output_text = process_instructor_response(text)
+    print(f"Instructor response: '{output_text}'")
 
     # 3) TTS or silence
     if tts is not None:
