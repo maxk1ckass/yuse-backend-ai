@@ -19,6 +19,7 @@ Frontend (Browser) ←→ WebSocket ←→ Relay Server (Python) ←→ WebSocke
    ```bash
    # Create .env file in qwen_cloud_relay directory
    echo "DASHSCOPE_API_KEY=sk-your-actual-api-key-here" > .env
+   echo "DASHSCOPE_BACKEND_URL=dashscope-intl.aliyuncs.com" >> .env
    echo "RELAY_PORT=8001" >> .env
    ```
 

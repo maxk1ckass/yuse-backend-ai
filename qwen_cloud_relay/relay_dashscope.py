@@ -26,7 +26,17 @@ logger = logging.getLogger(__name__)
 
 # DashScope configuration
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', 'sk-your-api-key-here')
+DASHSCOPE_BACKEND_URL = os.getenv('DASHSCOPE_BACKEND_URL', 'dashscope-intl.aliyuncs.com')
 dashscope.api_key = DASHSCOPE_API_KEY
+
+# Build WebSocket URL from backend URL
+DASHSCOPE_WS_URL = f"wss://{DASHSCOPE_BACKEND_URL}/api-ws/v1/realtime"
+
+# Debug configuration
+logger.info(f"API Key loaded: {DASHSCOPE_API_KEY[:10]}...{DASHSCOPE_API_KEY[-4:] if len(DASHSCOPE_API_KEY) > 14 else '...'}")
+logger.info(f"API Key length: {len(DASHSCOPE_API_KEY)}")
+logger.info(f"Backend URL: {DASHSCOPE_BACKEND_URL}")
+logger.info(f"WebSocket URL: {DASHSCOPE_WS_URL}")
 
 # Store active connections
 active_connections: Set[Any] = set()
@@ -47,12 +57,14 @@ class DashScopeRelay:
             conversation = OmniRealtimeConversation(
                 model='qwen-omni-turbo-realtime-latest',
                 callback=callback,
-                url="wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+                url=DASHSCOPE_WS_URL
             )
             
+            logger.info("Attempting to connect to DashScope...")
             # Connect to DashScope
             conversation.connect()
             dashscope_conversations[websocket] = conversation
+            logger.info("Successfully connected to DashScope")
             
             # Configure session
             conversation.update_session(
@@ -124,6 +136,9 @@ class DashScopeCallback(OmniRealtimeCallback):
         
     def on_close(self, close_status_code, close_msg) -> None:
         logger.info(f"DashScope connection closed: {close_status_code}, {close_msg}")
+        
+    def on_error(self, error) -> None:
+        logger.error(f"DashScope connection error: {error}")
         
     def on_event(self, response: dict) -> None:
         try:
