@@ -24,7 +24,7 @@ Frontend (Browser) ←→ WebSocket ←→ Relay Server (Python) ←→ WebSocke
 
 3. **Run the relay server:**
    ```bash
-   python dashscope.py
+   python relay_dashscope.py
    ```
 
 ## Usage
