@@ -155,7 +155,7 @@ class DashScopeCallback(OmniRealtimeCallback):
     async def send_to_frontend(self, response: dict):
         """Send DashScope response to frontend"""
         try:
-            if self.frontend_ws and not self.frontend_ws.closed:
+            if self.frontend_ws:
                 await self.frontend_ws.send(json.dumps(response))
         except Exception as e:
             logger.error(f"Error sending to frontend: {e}")
