@@ -1,10 +1,11 @@
 # main.py
 import os
 import re
-import numpy as np
 import time
+import threading
 from typing import Generator, Tuple
 
+import numpy as np
 from fastapi import FastAPI
 from dotenv import load_dotenv
 import torch
@@ -42,7 +43,6 @@ try:
 except Exception as e:
     print(f"⚠️  Voice processing limited: {e}")
 
-# Try to confirm ONNX Runtime availability (GPU or CPU is fine)
 if fastrtc_ok:
     try:
         import onnxruntime  # noqa: F401
@@ -60,7 +60,7 @@ tts = None
 if fastrtc_ok:
     try:
         print("INFO:     Warming up STT model.")
-        stt = get_stt_model()   # e.g., Whisper
+        stt = get_stt_model()
         print("INFO:     STT model warmed up.")
         print("✅ Speech recognition ready")
     except Exception as e:
@@ -69,7 +69,7 @@ if fastrtc_ok:
 
     try:
         print("INFO:     Warming up TTS model.")
-        tts = get_tts_model()   # e.g., Kokoro / XTTS
+        tts = get_tts_model()
         print("INFO:     TTS model warmed up.")
         print("✅ Voice synthesis ready")
     except Exception as e:
@@ -84,14 +84,13 @@ try:
     tokenizer = AutoTokenizer.from_pretrained(HF_MODEL, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL,
-        dtype=DTYPE,  # modern arg (replaces torch_dtype)
+        dtype=DTYPE,  # replaces torch_dtype
         device_map="auto" if USE_CUDA else None,
         trust_remote_code=True,
     )
     if not USE_CUDA:
         model = model.to(DEVICE)
 
-    # Reduce peak VRAM on follow-up turns
     try:
         model.generation_config.use_cache = False
     except Exception:
@@ -104,7 +103,7 @@ except Exception as e:
     model = None
 
 # ----------------------------
-# SYSTEM PROMPT (English instructor, restaurant scenario)
+# SYSTEM PROMPT
 # ----------------------------
 SYSTEM_PROMPT = (
     "You are Yuni from YUSE (pronounced as \"use\"), a friendly, patient English instructor.\n"
@@ -130,12 +129,15 @@ SYSTEM_PROMPT = (
 )
 
 # ----------------------------
-# Anti-feedback state & helpers
+# Anti-feedback + reentrancy state
 # ----------------------------
 SPEAKING = False
 LAST_AI_TEXT = ""
 TTS_COOLDOWN_S = 0.8
 last_tts_end_time = 0.0
+
+# Serialize handler calls to avoid "generator already executing"
+RESPOND_LOCK = threading.Lock()
 
 def _norm(s: str) -> str:
     s = s.lower().strip()
@@ -149,7 +151,6 @@ def is_self_echo(stt_text: str, ai_text: str) -> bool:
     a, b = _norm(stt_text), _norm(ai_text)
     if not a or not b:
         return False
-    # simple containment or equality covers most speaker-bleed cases
     return a == b or a in b or b in a
 
 # ----------------------------
@@ -159,7 +160,7 @@ def silence_chunk(seconds: float = 0.25, sr: int = 16000) -> Tuple[int, np.ndarr
     return (sr, np.zeros(int(sr * seconds), dtype=np.int16))
 
 def run_llm(user_text: str) -> str:
-    """Memory-frugal generation to avoid 2nd-turn VRAM spikes on V100-16GB."""
+    """Memory-frugal generation to avoid second-turn VRAM spikes."""
     if not user_text or not user_text.strip():
         return "Sorry, I didn't catch that. Please try again."
     if model is None or tokenizer is None:
@@ -171,15 +172,12 @@ def run_llm(user_text: str) -> str:
         {"role": "user", "content": user_text},
     ]
     inputs = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
+        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
     ).to(model.device)
 
     attention_mask = torch.ones_like(inputs)
 
-    # Trim context so KV cache stays small
+    # Trim context for small KV cache
     MAX_INPUT_TOKENS = 256
     if inputs.shape[-1] > MAX_INPUT_TOKENS:
         inputs = inputs[:, -MAX_INPUT_TOKENS:]
@@ -193,14 +191,13 @@ def run_llm(user_text: str) -> str:
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
-            use_cache=False,  # big win for VRAM headroom
+            use_cache=False,
             num_beams=1,
             pad_token_id=tokenizer.eos_token_id,
         )
 
     text = tokenizer.decode(output_ids[0][inputs.shape[-1]:], skip_special_tokens=True)
 
-    # cleanup
     try:
         del inputs, attention_mask, output_ids
         if torch.cuda.is_available():
@@ -214,7 +211,7 @@ def run_llm(user_text: str) -> str:
 # Audio pipeline
 # ----------------------------
 last_response_time = 0
-MIN_RESPONSE_INTERVAL = 2.0  # Minimum 2 seconds between responses
+MIN_RESPONSE_INTERVAL = 2.0  # seconds
 
 def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], None, None]:
     """
@@ -223,82 +220,95 @@ def respond(audio: Tuple[int, np.ndarray]) -> Generator[Tuple[int, np.ndarray], 
     """
     global last_response_time, LAST_AI_TEXT, SPEAKING, last_tts_end_time
 
-    sr, arr = audio
-    now = time.time()
-
-    # Gate 1: if the bot is currently speaking, ignore mic frames
-    if SPEAKING:
+    # ----- Reentrancy guard -----
+    if not RESPOND_LOCK.acquire(blocking=False):
+        # Another invocation is still running (LLM or TTS). Drop this one.
+        print("Reentry blocked: handler already running")
         yield silence_chunk(0.1)
         return
 
-    # Gate 2: small cooldown after TTS finishes to avoid speaker bleed
-    if now - last_tts_end_time < TTS_COOLDOWN_S:
-        yield silence_chunk(0.1)
-        return
+    try:
+        sr, arr = audio
+        now = time.time()
 
-    print(f"=== Audio Processing Debug ===")
-    print(f"Audio shape: {arr.shape}, sample rate: {sr}")
-    audio_length = arr.shape[-1] if len(arr.shape) > 1 else len(arr)
-    print(f"Audio duration: {audio_length / sr:.2f} seconds")
+        # Gate 1: if bot speaking, ignore mic
+        if SPEAKING:
+            yield silence_chunk(0.1)
+            return
 
-    # Gate 3: response throttle
-    if now - last_response_time < MIN_RESPONSE_INTERVAL:
-        print(f"⏰ Too soon since last response, ignoring audio")
-        yield silence_chunk(0.2)
-        return
+        # Gate 2: cooldown after TTS ends
+        if now - last_tts_end_time < TTS_COOLDOWN_S:
+            yield silence_chunk(0.1)
+            return
 
-    # 1) STT
-    if stt is None:
-        text = "Speech-to-text is not available. Please check your installation."
-        print(f"STT not available, using fallback text: {text}")
-    else:
-        print("Processing speech-to-text...")
-        try:
-            text = stt.stt(audio)
-            print(f"STT result: '{text}'")
-        except Exception as e:
-            print(f"STT error: {e}")
-            text = ""
+        print(f"=== Audio Processing Debug ===")
+        print(f"Audio shape: {arr.shape}, sample rate: {sr}")
+        audio_length = arr.shape[-1] if len(arr.shape) > 1 else len(arr)
+        print(f"Audio duration: {audio_length / sr:.2f} seconds")
 
-    # If empty STT, nudge user and return
-    if not text or not text.strip():
-        print("Empty STT; skipping LLM.")
+        # Gate 3: throttle
+        if now - last_response_time < MIN_RESPONSE_INTERVAL:
+            print("⏰ Too soon since last response, ignoring audio")
+            yield silence_chunk(0.2)
+            return
+
+        # 1) STT
+        if stt is None:
+            text = "Speech-to-text is not available. Please check your installation."
+            print(f"STT not available, using fallback text: {text}")
+        else:
+            print("Processing speech-to-text...")
+            try:
+                text = stt.stt(audio)
+                print(f"STT result: '{text}'")
+            except Exception as e:
+                print(f"STT error: {e}")
+                text = ""
+
+        # Skip empty STT with gentle nudge
+        if not text or not text.strip():
+            print("Empty STT; skipping LLM.")
+            if tts is not None:
+                SPEAKING = True
+                for chunk in tts.stream_tts_sync("Sorry, I didn't catch that. Please try again."):
+                    yield chunk
+                SPEAKING = False
+                last_tts_end_time = time.time()
+            else:
+                yield silence_chunk(0.2)
+            return
+
+        # 2) Self-echo filter
+        if is_self_echo(text, LAST_AI_TEXT):
+            print("Detected self-echo; dropping this turn.")
+            yield silence_chunk(0.1)
+            return
+
+        # 3) LLM
+        print(f"Running LLM with input: '{text}'")
+        output_text = run_llm(text)
+        print(f"LLM output: '{output_text}'")
+
+        # 4) TTS or silence
         if tts is not None:
+            print("Generating TTS audio...")
+            last_response_time = now
+            LAST_AI_TEXT = output_text
             SPEAKING = True
-            for chunk in tts.stream_tts_sync("Sorry, I didn't catch that. Please try again."):
+            for chunk in tts.stream_tts_sync(output_text):
                 yield chunk
             SPEAKING = False
             last_tts_end_time = time.time()
         else:
+            print("TTS not available, returning silence")
             yield silence_chunk(0.2)
-        return
 
-    # 2) Self-echo filter
-    if is_self_echo(text, LAST_AI_TEXT):
-        print("Detected self-echo; dropping this turn.")
-        yield silence_chunk(0.1)
-        return
+        print("=== End Audio Processing ===")
 
-    # 3) LLM
-    print(f"Running LLM with input: '{text}'")
-    output_text = run_llm(text)
-    print(f"LLM output: '{output_text}'")
-
-    # 4) TTS or silence
-    if tts is not None:
-        print("Generating TTS audio...")
-        last_response_time = now
-        LAST_AI_TEXT = output_text
-        SPEAKING = True
-        for chunk in tts.stream_tts_sync(output_text):
-            yield chunk
-        SPEAKING = False
-        last_tts_end_time = time.time()
-    else:
-        print("TTS not available, returning silence")
-        yield silence_chunk(0.2)
-
-    print("=== End Audio Processing ===")
+    finally:
+        # Always release lock to avoid deadlock if an exception occurs
+        if RESPOND_LOCK.locked():
+            RESPOND_LOCK.release()
 
 # ----------------------------
 # Build Stream + FastAPI
@@ -308,7 +318,7 @@ app = FastAPI()
 if fastrtc_ok:
     try:
         if vad_ok:
-            # Use non-interruptible VAD at first to avoid mid-TTS reentry
+            # Keep non-interruptible to avoid reentry during TTS
             stream = Stream(
                 handler=ReplyOnPause(respond, can_interrupt=False),
                 modality="audio",
@@ -316,7 +326,6 @@ if fastrtc_ok:
             )
             print("Using ReplyOnPause with VAD")
         else:
-            # No VAD → simple handler that just calls respond() per request
             def no_vad_handler(audio):
                 try:
                     for ch in respond(audio):
@@ -331,7 +340,7 @@ if fastrtc_ok:
                 mode="send-receive",
             )
             print("Using simple no-VAD handler")
-        stream.mount(app)  # exposes /webrtc/offer & /websocket/offer on this FastAPI app
+        stream.mount(app)
     except Exception as e:
         print(f"Failed to initialize FastRTC Stream: {e}")
 else:
