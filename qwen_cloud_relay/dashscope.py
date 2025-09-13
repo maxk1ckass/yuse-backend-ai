@@ -10,7 +10,7 @@ import json
 import os
 import base64
 import logging
-from typing import Dict, Set
+from typing import Dict, Set, Any
 import signal
 import sys
 from dotenv import load_dotenv
@@ -27,14 +27,14 @@ DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', 'sk-your-api-key-here')
 DASHSCOPE_WS_URL = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
 
 # Store active connections
-active_connections: Set[websockets.WebSocketServerProtocol] = set()
-dashscope_connections: Dict[websockets.WebSocketServerProtocol, websockets.WebSocketClientProtocol] = {}
+active_connections: Set[Any] = set()
+dashscope_connections: Dict[Any, Any] = {}
 
 class DashScopeRelay:
     def __init__(self):
         self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
         
-    async def handle_frontend_connection(self, websocket, path):
+    async def handle_frontend_connection(self, websocket, path=None):
         """Handle connection from frontend"""
         logger.info(f"Frontend connected: {websocket.remote_address}")
         active_connections.add(websocket)
