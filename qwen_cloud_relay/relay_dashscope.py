@@ -53,7 +53,7 @@ class DashScopeRelay:
         
         try:
             # Create DashScope conversation with callback
-            callback = DashScopeCallback(websocket)
+            callback = DashScopeCallback(websocket, asyncio.get_event_loop())
             conversation = OmniRealtimeConversation(
                 model='qwen-omni-turbo-realtime-latest',
                 callback=callback,
@@ -128,8 +128,9 @@ class DashScopeRelay:
         await server.wait_closed()
 
 class DashScopeCallback(OmniRealtimeCallback):
-    def __init__(self, frontend_websocket):
+    def __init__(self, frontend_websocket, event_loop):
         self.frontend_ws = frontend_websocket
+        self.event_loop = event_loop
         
     def on_open(self) -> None:
         logger.info("DashScope connection opened")
@@ -142,8 +143,12 @@ class DashScopeCallback(OmniRealtimeCallback):
         
     def on_event(self, response: dict) -> None:
         try:
-            # Forward DashScope events to frontend
-            asyncio.create_task(self.send_to_frontend(response))
+            # Forward DashScope events to frontend using the event loop
+            if self.event_loop and not self.event_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self.send_to_frontend(response), 
+                    self.event_loop
+                )
         except Exception as e:
             logger.error(f"Error in DashScope callback: {e}")
     
