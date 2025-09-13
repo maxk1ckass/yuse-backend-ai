@@ -15,9 +15,11 @@ Frontend (Browser) ←→ WebSocket ←→ Relay Server (Python) ←→ WebSocke
    pip install -r requirements.txt
    ```
 
-2. **Set environment variable:**
+2. **Create .env file:**
    ```bash
-   export DASHSCOPE_API_KEY=sk-your-actual-api-key-here
+   # Create .env file in qwen_cloud_relay directory
+   echo "DASHSCOPE_API_KEY=sk-your-actual-api-key-here" > .env
+   echo "RELAY_PORT=8001" >> .env
    ```
 
 3. **Run the relay server:**

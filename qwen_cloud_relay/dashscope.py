@@ -13,6 +13,10 @@ import logging
 from typing import Dict, Set
 import signal
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +32,7 @@ dashscope_connections: Dict[websockets.WebSocketServerProtocol, websockets.WebSo
 
 class DashScopeRelay:
     def __init__(self):
-        self.port = 8001  # Different from FastRTC (8000)
+        self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
         
     async def handle_frontend_connection(self, websocket, path):
         """Handle connection from frontend"""
