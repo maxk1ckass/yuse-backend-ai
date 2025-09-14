@@ -3,7 +3,7 @@
 DashScope WebSocket Relay Server (minimal + robust)
 - Accepts browser WS on ws://<host>:8001
 - Opens DashScope Realtime connection via official SDK
-- Applies ONLY 'instructions' (system prompt) to session to avoid enum/type traps
+- Applies instructions + minimal required session fields (output_modalities, voice)
 - Relays events bidirectionally
 
 ENV (.env):
@@ -28,6 +28,7 @@ import dashscope
 from dashscope.audio.qwen_omni import (
     OmniRealtimeConversation,
     OmniRealtimeCallback,
+    MultiModality,     # <-- use enums for required fields
 )
 
 # -----------------------------------------------------------------------------
@@ -64,7 +65,7 @@ active_connections: Set[Any] = set()
 dashscope_conversations: Dict[Any, OmniRealtimeConversation] = {}
 
 # -----------------------------------------------------------------------------
-# System context (instructions only — no enums)
+# System context (instructions + minimal required fields only)
 # -----------------------------------------------------------------------------
 INSTRUCTIONS = """You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios.
 
@@ -73,8 +74,8 @@ CONTEXT: You are teaching English through a restaurant ordering roleplay. The st
 THE WAY TO INTERACT WITH THE STUDENT:
 - Ask if the student wants to play the waiter/waitress role or the customer role
 - Once the student chooses, you start the roleplay
-- Every time you speak, keep it to 1–2 short sentences and then wait for the student
-- Finish the scenario turn by turn
+- Speak 1–2 short sentences and then wait for the student
+- Proceed turn by turn
 - After finishing, ask if they'd like to switch roles
 - Keep vocabulary simple (A2–B1), be encouraging, add tiny inline corrections in [brackets] if helpful
 """
@@ -138,20 +139,18 @@ async def handle_client(client_ws: Any, path: str | None = None):
         dashscope_conversations[client_ws] = conversation
         logger.info("Connected to DashScope.")
 
-        # ✅ Only set instructions — keep everything else default (this matches your working setup)
+        # ✅ Minimal, safe session update:
+        # - output_modalities via enums
+        # - voice as simple string (SDK accepts strings for voice)
+        # - instructions as your system context
         try:
-            conversation.update_session(instructions=INSTRUCTIONS)
+            conversation.update_session(
+                output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+                voice="Chelsie",
+                instructions=INSTRUCTIONS,
+            )
         except Exception as e:
-            logger.error("session.update (instructions) failed: %s", e)
-
-        # Optional: greet and trigger a response (leave commented if you want silence until user speaks)
-        # try:
-        #     conversation.append_text(
-        #         "Hello! Let's practice ordering at a restaurant. Would you like to be the waiter/waitress or the customer?"
-        #     )
-        #     conversation.create_response()
-        # except Exception:
-        #     pass
+            logger.error("session.update failed: %s", e)
 
         # Relay messages from browser to DashScope
         async for raw in client_ws:
@@ -164,15 +163,19 @@ async def handle_client(client_ws: Any, path: str | None = None):
             msg_type = data.get("type")
 
             if msg_type == "session.update":
-                # Only instructions are guaranteed safe (avoid enums)
+                # Only instructions are guaranteed safe across SDK versions;
+                # we deliberately ignore other fields here to avoid enum/type issues.
                 session = data.get("session", {})
                 instructions = session.get("instructions")
                 if instructions:
                     try:
-                        conversation.update_session(instructions=instructions)
+                        conversation.update_session(
+                            output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+                            voice="Chelsie",
+                            instructions=instructions,
+                        )
                     except Exception as e:
                         logger.error("session.update (instructions) failed: %s", e)
-                # Ignore other fields here to avoid enum/type mismatches.
 
             elif msg_type == "input_audio_buffer.append":
                 b64 = data.get("audio")
