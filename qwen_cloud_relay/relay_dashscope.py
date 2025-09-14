@@ -1,259 +1,207 @@
 #!/usr/bin/env python3
 """
-DashScope WebSocket Relay Server (minimal + robust)
-- Accepts browser WS on ws://<host>:8001
-- Opens DashScope Realtime connection via official SDK
-- Applies instructions + minimal required session fields (output_modalities, voice)
-- Relays events bidirectionally
-
-ENV (.env):
-  DASHSCOPE_API_KEY=sk-...
-  DASHSCOPE_BACKEND_URL=dashscope-intl.aliyuncs.com   # or dashscope.aliyuncs.com
-  RELAY_PORT=8001
-  DASHSCOPE_MODEL=qwen-omni-turbo-realtime-latest
+DashScope WebSocket Relay Server
+Relays WebSocket connections between frontend and DashScope cloud API using official SDK
 """
 
 import asyncio
+import websockets
 import json
-import logging
 import os
+import base64
+import logging
+from typing import Dict, Set, Any
 import signal
 import sys
-from typing import Any, Dict, Set
-
-import websockets
 from dotenv import load_dotenv
-
 import dashscope
-from dashscope.audio.qwen_omni import (
-    OmniRealtimeConversation,
-    OmniRealtimeCallback,
-    MultiModality,     # <-- use enums for required fields
-)
+from dashscope.audio.qwen_omni import *
 
-# -----------------------------------------------------------------------------
-# Env & logging
-# -----------------------------------------------------------------------------
+# Load environment variables from .env file
 load_dotenv()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("dashscope-relay")
 
-DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
-DASHSCOPE_BACKEND_URL = os.getenv("DASHSCOPE_BACKEND_URL", "dashscope-intl.aliyuncs.com")
-DASHSCOPE_WS_URL = f"wss://{DASHSCOPE_BACKEND_URL}/api-ws/v1/realtime"
-DASHSCOPE_MODEL = os.getenv("DASHSCOPE_MODEL", "qwen-omni-turbo-realtime-latest")
-RELAY_PORT = int(os.getenv("RELAY_PORT", "8001"))
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-if not DASHSCOPE_API_KEY:
-    logger.error("DASHSCOPE_API_KEY is not set.")
-    sys.exit(1)
-
+# DashScope configuration
+DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', 'sk-your-api-key-here')
+DASHSCOPE_BACKEND_URL = os.getenv('DASHSCOPE_BACKEND_URL', 'dashscope-intl.aliyuncs.com')
 dashscope.api_key = DASHSCOPE_API_KEY
 
-logger.info("Backend: %s", DASHSCOPE_BACKEND_URL)
-logger.info("Realtime WS URL: %s", DASHSCOPE_WS_URL)
-logger.info("Model: %s", DASHSCOPE_MODEL)
+# Build WebSocket URL from backend URL
+DASHSCOPE_WS_URL = f"wss://{DASHSCOPE_BACKEND_URL}/api-ws/v1/realtime"
 
-# -----------------------------------------------------------------------------
-# Global connection tracking (optional)
-# -----------------------------------------------------------------------------
+# Debug configuration
+logger.info(f"API Key loaded: {DASHSCOPE_API_KEY[:10]}...{DASHSCOPE_API_KEY[-4:] if len(DASHSCOPE_API_KEY) > 14 else '...'}")
+logger.info(f"API Key length: {len(DASHSCOPE_API_KEY)}")
+logger.info(f"Backend URL: {DASHSCOPE_BACKEND_URL}")
+logger.info(f"WebSocket URL: {DASHSCOPE_WS_URL}")
+
+# Store active connections
 active_connections: Set[Any] = set()
 dashscope_conversations: Dict[Any, OmniRealtimeConversation] = {}
 
-# -----------------------------------------------------------------------------
-# System context (instructions + minimal required fields only)
-# -----------------------------------------------------------------------------
-INSTRUCTIONS = """You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios.
+class DashScopeRelay:
+    def __init__(self):
+        self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
+        
+    async def handle_frontend_connection(self, websocket, path=None):
+        """Handle connection from frontend"""
+        logger.info(f"Frontend connected: {websocket.remote_address}")
+        active_connections.add(websocket)
+        
+        try:
+            # Create DashScope conversation with callback
+            callback = DashScopeCallback(websocket, asyncio.get_event_loop())
+            conversation = OmniRealtimeConversation(
+                model='qwen-omni-turbo-realtime-latest',
+                callback=callback,
+                url=DASHSCOPE_WS_URL
+            )
+            
+            logger.info("Attempting to connect to DashScope...")
+            # Connect to DashScope
+            conversation.connect()
+            dashscope_conversations[websocket] = conversation
+            logger.info("Successfully connected to DashScope")
+            
+            # Configure session with restaurant ordering context
+            conversation.update_session(
+                output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+                voice='Chelsie',
+                input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                enable_input_audio_transcription=True,
+                input_audio_transcription_model='gummy-realtime-v1',
+                enable_turn_detection=True,
+                turn_detection_type='server_vad',
+                system_prompt="""You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios. 
 
 CONTEXT: You are teaching English through a restaurant ordering roleplay. The student is learning how to order food, ask questions about the menu, and interact with restaurant staff.
 
 THE WAY TO INTERACT WITH THE STUDENT:
-- Ask if the student wants to play the waiter/waitress role or the customer role
-- Once the student chooses, you start the roleplay
-- Speak 1–2 short sentences and then wait for the student
-- Proceed turn by turn
-- After finishing, ask if they'd like to switch roles
-- Keep vocabulary simple (A2–B1), be encouraging, add tiny inline corrections in [brackets] if helpful
-"""
+- Ask if the student want to play the waiter/waitress role or the customer role
+- Once the student choose, you start the roleplay
+- Everytime, you speek a sentence, and wait for the student to speak the next turn
+- Finish the scenario script with the student turn by turn
+- Ask if the student want to switch roles after the scenario is finished
+- For each turn, you sentence should be short and not too complicated, the student is a beginner
 
-# -----------------------------------------------------------------------------
-# DashScope callback → forwards server events to the browser
-# -----------------------------------------------------------------------------
-class RelayCallback(OmniRealtimeCallback):
-    def __init__(self, client_ws: Any, loop: asyncio.AbstractEventLoop):
-        self.client_ws = client_ws
-        self.loop = loop
+SCENARIO: The student is at a restaurant and needs to order food. You can be either:
+1. The waiter/waitress taking their order
+2. A friend helping them practice
 
+Start by greeting them warmly and asking what they'd like to order today. Keep responses conversational and educational."""
+            )
+            
+            logger.info("Connected to DashScope cloud")
+            
+            # Handle messages from frontend
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    if data.get('type') == 'session.update':
+                        # Frontend is sending session config - we already configured it
+                        logger.info("Session configuration received from frontend")
+                    elif data.get('type') == 'input_audio_buffer.append':
+                        # Forward audio data to DashScope
+                        audio_b64 = data.get('audio')
+                        if audio_b64:
+                            conversation.append_audio(audio_b64)
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON from frontend: {message}")
+                except Exception as e:
+                    logger.error(f"Error processing frontend message: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error handling frontend connection: {e}")
+        finally:
+            # Cleanup
+            active_connections.discard(websocket)
+            if websocket in dashscope_conversations:
+                dashscope_conversations[websocket].close()
+                del dashscope_conversations[websocket]
+            logger.info(f"Frontend disconnected: {websocket.remote_address}")
+    
+    async def start_server(self):
+        """Start the relay server"""
+        logger.info(f"Starting DashScope relay server on port {self.port}")
+        logger.info(f"DashScope API Key: {DASHSCOPE_API_KEY[:10]}...")
+        
+        # Start WebSocket server
+        server = await websockets.serve(
+            self.handle_frontend_connection,
+            "0.0.0.0",
+            self.port,
+            ping_interval=20,
+            ping_timeout=10
+        )
+        
+        logger.info(f"✅ DashScope relay server running on ws://localhost:{self.port}")
+        logger.info("Ready to relay connections to DashScope cloud")
+        
+        # Keep server running
+        await server.wait_closed()
+
+class DashScopeCallback(OmniRealtimeCallback):
+    def __init__(self, frontend_websocket, event_loop):
+        self.frontend_ws = frontend_websocket
+        self.event_loop = event_loop
+        
     def on_open(self) -> None:
-        logger.info("[DashScope] connection opened")
-
-    def on_close(self, code, msg) -> None:
-        logger.info("[DashScope] connection closed: %s %s", code, msg)
-
+        logger.info("DashScope connection opened")
+        
+    def on_close(self, close_status_code, close_msg) -> None:
+        logger.info(f"DashScope connection closed: {close_status_code}, {close_msg}")
+        
     def on_error(self, error) -> None:
-        logger.error("[DashScope] error: %s", error)
-
+        logger.error(f"DashScope connection error: {error}")
+        
     def on_event(self, response: dict) -> None:
-        # Forward every event to the browser client unchanged
         try:
-            if self.loop and not self.loop.is_closed():
+            # Forward DashScope events to frontend using the event loop
+            if self.event_loop and not self.event_loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
-                    self._send_to_client(response), self.loop
+                    self.send_to_frontend(response), 
+                    self.event_loop
                 )
         except Exception as e:
-            logger.error("Callback forward error: %s", e)
-
-    async def _send_to_client(self, obj: dict):
-        if getattr(self.client_ws, "closed", True):
-            return
+            logger.error(f"Error in DashScope callback: {e}")
+    
+    async def send_to_frontend(self, response: dict):
+        """Send DashScope response to frontend"""
         try:
-            await self.client_ws.send(json.dumps(obj))
+            if self.frontend_ws:
+                await self.frontend_ws.send(json.dumps(response))
         except Exception as e:
-            logger.error("send to client failed: %s", e)
+            logger.error(f"Error sending to frontend: {e}")
 
-# -----------------------------------------------------------------------------
-# Per-client handler (compatible with websockets ≥11 and legacy)
-# -----------------------------------------------------------------------------
-async def handle_client(client_ws: Any, path: str | None = None):
-    """Bridge a single browser WS to a single DashScope Realtime conversation."""
-    active_connections.add(client_ws)
-    loop = asyncio.get_event_loop()
-
-    conn_path = getattr(client_ws, "path", path)
-    logger.info("Client connected: %s %s", getattr(client_ws, "remote_address", None), conn_path)
-
-    conversation: OmniRealtimeConversation | None = None
-    try:
-        callback = RelayCallback(client_ws, loop)
-        conversation = OmniRealtimeConversation(
-            model=DASHSCOPE_MODEL,
-            callback=callback,
-            url=DASHSCOPE_WS_URL,
-        )
-        logger.info("Connecting to DashScope...")
-        conversation.connect()
-        dashscope_conversations[client_ws] = conversation
-        logger.info("Connected to DashScope.")
-
-        # ✅ Minimal, safe session update:
-        # - output_modalities via enums
-        # - voice as simple string (SDK accepts strings for voice)
-        # - instructions as your system context
-        try:
-            conversation.update_session(
-                output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
-                voice="Chelsie",
-                instructions=INSTRUCTIONS,
-            )
-        except Exception as e:
-            logger.error("session.update failed: %s", e)
-
-        # Relay messages from browser to DashScope
-        async for raw in client_ws:
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning("Non-JSON frame from client, ignoring.")
-                continue
-
-            msg_type = data.get("type")
-
-            if msg_type == "session.update":
-                # Only instructions are guaranteed safe across SDK versions;
-                # we deliberately ignore other fields here to avoid enum/type issues.
-                session = data.get("session", {})
-                instructions = session.get("instructions")
-                if instructions:
-                    try:
-                        conversation.update_session(
-                            output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
-                            voice="Chelsie",
-                            instructions=instructions,
-                        )
-                    except Exception as e:
-                        logger.error("session.update (instructions) failed: %s", e)
-
-            elif msg_type == "input_audio_buffer.append":
-                b64 = data.get("audio")
-                if b64:
-                    try:
-                        conversation.append_audio(b64)
-                    except Exception as e:
-                        logger.error("append_audio failed: %s", e)
-
-            elif msg_type == "input_audio_buffer.commit":
-                try:
-                    conversation.commit_audio()
-                except Exception as e:
-                    logger.error("commit_audio failed: %s", e)
-
-            elif msg_type == "response.create":
-                try:
-                    conversation.create_response()
-                except Exception as e:
-                    logger.error("create_response failed: %s", e)
-
-            elif msg_type == "conversation.append_text":
-                txt = data.get("text", "")
-                if txt:
-                    try:
-                        conversation.append_text(txt)
-                    except Exception as e:
-                        logger.error("append_text failed: %s", e)
-
-            else:
-                # Unknown UI-only message: ignore
-                pass
-
-    except Exception as e:
-        logger.error("Client handler error: %s", e)
-
-    finally:
-        if conversation is not None:
-            try:
-                conversation.close()
-            except Exception:
-                pass
-        dashscope_conversations.pop(client_ws, None)
-        active_connections.discard(client_ws)
-        try:
-            await client_ws.close()
-        except Exception:
-            pass
-        logger.info("Client disconnected.")
-
-# -----------------------------------------------------------------------------
-# Server bootstrap
-# -----------------------------------------------------------------------------
-async def main():
-    logger.info("Starting relay on ws://0.0.0.0:%d", RELAY_PORT)
-    server = await websockets.serve(
-        handle_client,              # handler accepts (ws) or (ws, path)
-        host="0.0.0.0",
-        port=RELAY_PORT,
-        ping_interval=20,
-        ping_timeout=10,
-        max_size=2**22,             # ~4MB for audio frames
-    )
-    logger.info("✅ Relay running. Forwarding to %s (model=%s)", DASHSCOPE_WS_URL, DASHSCOPE_MODEL)
-    await server.wait_closed()
-
-def _sigint(sig, frame):
-    logger.info("Shutting down...")
-    for ws in list(active_connections):
-        try:
-            asyncio.get_event_loop().create_task(ws.close())
-        except Exception:
-            pass
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully"""
+    logger.info("Shutting down relay server...")
     sys.exit(0)
 
+async def main():
+    """Main entry point"""
+    # Set up signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Check API key
+    if not DASHSCOPE_API_KEY or DASHSCOPE_API_KEY == 'sk-your-api-key-here':
+        logger.error("❌ DASHSCOPE_API_KEY not set!")
+        logger.error("Please set DASHSCOPE_API_KEY in your .env file")
+        sys.exit(1)
+    
+    # Start relay server
+    relay = DashScopeRelay()
+    await relay.start_server()
+
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, _sigint)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        _sigint(None, None)
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        sys.exit(1)
