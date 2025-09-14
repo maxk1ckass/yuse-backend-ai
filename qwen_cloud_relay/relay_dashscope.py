@@ -148,21 +148,31 @@ START BY::
         logger.info(f"Starting DashScope relay server on port {self.port}")
         logger.info(f"DashScope API Key: {DASHSCOPE_API_KEY[:10]}...")
 
-        # should respond to azure health probe and return 200
-        async def process_request(path, request_headers):
-            # Health probe (HEAD/GET)
+        # Closure captures `self` so you can read class data
+        async def process_request(protocol, request):
+            path = getattr(request, "path", "/")
+            # Health probe from Azure Front Door
             if path == "/health":
-                # For HEAD, return an empty body; for GET, return "ok"
-                method = request_headers.get("Method") or request_headers.get(":method")
-                body = b"" if (method and method.upper() == "HEAD") else b"ok"
-                return (http.HTTPStatus.OK, [("Content-Type", "text/plain")], body)
+                return (
+                    http.HTTPStatus.OK,
+                    [("Content-Type", "text/plain"), ("Cache-Control", "no-store")],
+                    self.health_message.encode("utf-8"),
+                )
 
-            # (Optional) Return 200 on "/" to make browser tests friendlier
+            # Optional: make "/" return 200 so a browser GET doesn't 504
             if path == "/":
-                return (http.HTTPStatus.OK, [("Content-Type", "text/plain")], b"WS backend\n")
+                return (
+                    http.HTTPStatus.OK,
+                    [("Content-Type", "text/plain"), ("Cache-Control", "no-store")],
+                    b"WS backend\n",
+                )
 
-            # For all other non-WS HTTP requests
-            return (http.HTTPStatus.METHOD_NOT_ALLOWED, [], b"websocket only\n")
+            # For all other plain-HTTP requests, hint it's WS-only
+            return (
+                http.HTTPStatus.UPGRADE_REQUIRED,  # 426
+                [("Content-Type", "text/plain"), ("Connection", "close")],
+                b"WebSocket endpoint. Use WS/WSS.\n",
+            )
         
         # Start WebSocket server
         server = await websockets.serve(
