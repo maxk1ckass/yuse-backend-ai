@@ -46,6 +46,7 @@ dashscope_conversations: Dict[Any, OmniRealtimeConversation] = {}
 class DashScopeRelay:
     def __init__(self):
         self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
+        self.health_probe_health_message = "ok"  # whatever class data you want
         
     async def handle_frontend_connection(self, websocket, path=None):
         """Handle connection from frontend"""
@@ -156,7 +157,7 @@ START BY::
                 return (
                     http.HTTPStatus.OK,
                     [("Content-Type", "text/plain"), ("Cache-Control", "no-store")],
-                    self.health_message.encode("utf-8"),
+                    self.health_probe_health_message.encode("utf-8"),
                 )
 
             # Optional: make "/" return 200 so a browser GET doesn't 504
