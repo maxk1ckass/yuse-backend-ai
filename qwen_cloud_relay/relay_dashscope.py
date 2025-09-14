@@ -6,6 +6,7 @@ Relays WebSocket connections between frontend and DashScope cloud API using offi
 
 import asyncio
 import http
+from websockets.http11 import Response  # <-- key import
 import websockets
 import json
 import os
@@ -149,31 +150,48 @@ START BY::
         logger.info(f"Starting DashScope relay server on port {self.port}")
         logger.info(f"DashScope API Key: {DASHSCOPE_API_KEY[:10]}...")
 
-        # Closure captures `self` so you can read class data
         async def process_request(protocol, request):
-            path = getattr(request, "path", "/")
-            # Health probe from Azure Front Door
-            if path == "/health":
-                return (
-                    http.HTTPStatus.OK,
-                    [("Content-Type", "text/plain"), ("Cache-Control", "no-store")],
-                    self.health_probe_health_message.encode("utf-8"),
-                )
+            try:
+                path = getattr(request, "path", "/")
+                logger.info(f"HTTP probe on {path}")
 
-            # Optional: make "/" return 200 so a browser GET doesn't 504
-            if path == "/":
-                return (
-                    http.HTTPStatus.OK,
-                    [("Content-Type", "text/plain"), ("Cache-Control", "no-store")],
-                    b"WS backend\n",
-                )
+                if path == "/health":
+                    body = getattr(self, "health_message", "ok").encode("utf-8")
+                    return Response(
+                        200,
+                        headers=[
+                            (b"content-type", b"text/plain"),
+                            (b"cache-control", b"no-store"),
+                        ],
+                        body=body,
+                    )
 
-            # For all other plain-HTTP requests, hint it's WS-only
-            return (
-                http.HTTPStatus.UPGRADE_REQUIRED,  # 426
-                [("Content-Type", "text/plain"), ("Connection", "close")],
-                b"WebSocket endpoint. Use WS/WSS.\n",
-            )
+                if path == "/":
+                    return Response(
+                        200,
+                        headers=[
+                            (b"content-type", b"text/plain"),
+                            (b"cache-control", b"no-store"),
+                        ],
+                        body=b"WS backend\n",
+                    )
+
+                # Non-WS HTTP on other paths -> hint upgrade
+                return Response(
+                    426,  # UPGRADE_REQUIRED
+                    headers=[
+                        (b"content-type", b"text/plain"),
+                        (b"connection", b"close"),
+                    ],
+                    body=b"WebSocket endpoint. Use WS/WSS.\n",
+                )
+            except Exception as e:
+                logger.exception(f"process_request error: {e}")
+                return Response(
+                    500,
+                    headers=[(b"content-type", b"text/plain")],
+                    body=b"internal error\n",
+                )
         
         # Start WebSocket server
         server = await websockets.serve(
