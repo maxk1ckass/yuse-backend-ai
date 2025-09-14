@@ -66,7 +66,7 @@ class DashScopeRelay:
             dashscope_conversations[websocket] = conversation
             logger.info("Successfully connected to DashScope")
             
-            # Configure session with restaurant ordering context
+            # Configure session
             conversation.update_session(
                 output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
                 voice='Chelsie',
@@ -76,7 +76,10 @@ class DashScopeRelay:
                 input_audio_transcription_model='gummy-realtime-v1',
                 enable_turn_detection=True,
                 turn_detection_type='server_vad',
-                system_prompt="""You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios. 
+            )
+            
+            # Send context as first message
+            context_message = """You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios. 
 
 CONTEXT: You are teaching English through a restaurant ordering roleplay. The student is learning how to order food, ask questions about the menu, and interact with restaurant staff.
 
@@ -93,7 +96,9 @@ SCENARIO: The student is at a restaurant and needs to order food. You can be eit
 2. A friend helping them practice
 
 Start by greeting them warmly and asking what they'd like to order today. Keep responses conversational and educational."""
-            )
+            
+            # Send the context message
+            conversation.append_text(context_message)
             
             logger.info("Connected to DashScope cloud")
             
