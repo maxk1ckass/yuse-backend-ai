@@ -76,7 +76,7 @@ class DashScopeRelay:
                 input_audio_transcription_model='gummy-realtime-v1',
                 enable_turn_detection=True,
                 turn_detection_type='server_vad',
-                system_prompt="""You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios. 
+                instructions="""You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios. 
 
 CONTEXT: You are teaching English through a restaurant ordering roleplay. The student is learning how to order food, ask questions about the menu, and interact with restaurant staff.
 
