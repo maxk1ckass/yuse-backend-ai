@@ -7,6 +7,7 @@ Relays WebSocket connections between frontend and DashScope cloud API using offi
 import asyncio
 import http
 from websockets.http11 import Response  # <-- key import
+from websockets.datastructures import Headers # <-- add this
 import websockets
 import json
 import os
@@ -150,15 +151,22 @@ START BY::
         logger.info(f"Starting DashScope relay server on port {self.port}")
         logger.info(f"DashScope API Key: {DASHSCOPE_API_KEY[:10]}...")
 
-        def make_response(status: int | http.HTTPStatus, headers=None, body: bytes = b""):
-            # websockets.http11.Response(status_code, reason_phrase: bytes, headers, body)
+        def make_response(status: int | http.HTTPStatus, headers: Headers | None = None, body: bytes = b""):
+            # Build a websockets.http11.Response the way websockets>=12 expects it.
             if isinstance(status, http.HTTPStatus):
                 code = status.value
                 reason = status.phrase.encode("ascii")
             else:
                 code = int(status)
                 reason = http.HTTPStatus(code).phrase.encode("ascii")
-            return Response(code, reason, headers or [], body)
+
+            if headers is None:
+                headers = Headers()
+            # Ensure required headers exist when body present (optional but nice)
+            if body and b"content-length" not in {k.lower().encode() if isinstance(k, str) else k.lower() for k, _ in headers.raw_items()}:
+                headers["content-length"] = str(len(body))
+
+            return Response(code, reason, headers, body)
 
         async def process_request(protocol, request):
             try:
@@ -167,43 +175,29 @@ START BY::
 
                 if path == "/health":
                     body = getattr(self, "health_probe_health_message", "ok").encode("utf-8")
-                    return make_response(
-                        http.HTTPStatus.OK,
-                        headers=[
-                            (b"content-type", b"text/plain"),
-                            (b"cache-control", b"no-store"),
-                        ],
-                        body=body,
-                    )
+                    h = Headers()
+                    h["content-type"] = "text/plain"
+                    h["cache-control"] = "no-store"
+                    return make_response(http.HTTPStatus.OK, h, body)
 
                 if path == "/":
-                    return make_response(
-                        http.HTTPStatus.OK,
-                        headers=[
-                            (b"content-type", b"text/plain"),
-                            (b"cache-control", b"no-store"),
-                        ],
-                        body=b"WS backend\n",
-                    )
+                    h = Headers()
+                    h["content-type"] = "text/plain"
+                    h["cache-control"] = "no-store"
+                    return make_response(http.HTTPStatus.OK, h, b"WS backend\n")
 
-                # Non-WS HTTP to other paths: hint upgrade
-                return make_response(
-                    http.HTTPStatus.UPGRADE_REQUIRED,   # 426
-                    headers=[
-                        (b"content-type", b"text/plain"),
-                        (b"connection", b"close"),
-                    ],
-                    body=b"WebSocket endpoint. Use WS/WSS.\n",
-                )
+                # Non-WS HTTP to other paths -> hint upgrade
+                h = Headers()
+                h["content-type"] = "text/plain"
+                h["connection"] = "close"
+                return make_response(http.HTTPStatus.UPGRADE_REQUIRED, h, b"WebSocket endpoint. Use WS/WSS.\n")
 
             except Exception as e:
                 logger.exception(f"process_request error: {e}")
-                return make_response(
-                    http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                    headers=[(b"content-type", b"text/plain")],
-                    body=b"internal error\n",
-                )
-        
+                h = Headers()
+                h["content-type"] = "text/plain"
+                return make_response(http.HTTPStatus.INTERNAL_SERVER_ERROR, h, b"internal error\n")
+
         # Start WebSocket server
         server = await websockets.serve(
             self.handle_frontend_connection,
