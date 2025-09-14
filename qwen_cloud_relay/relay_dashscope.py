@@ -5,6 +5,7 @@ Relays WebSocket connections between frontend and DashScope cloud API using offi
 """
 
 import asyncio
+import http
 import websockets
 import json
 import os
@@ -153,7 +154,8 @@ START BY::
             "0.0.0.0",
             self.port,
             ping_interval=20,
-            ping_timeout=10
+            ping_timeout=10,
+            process_request=self.process_request
         )
         
         logger.info(f"✅ DashScope relay server running on ws://localhost:{self.port}")
@@ -161,6 +163,22 @@ START BY::
         
         # Keep server running
         await server.wait_closed()
+
+    # should respond to azure health probe and return 200
+    async def process_request(path, request_headers):
+        # Health probe (HEAD/GET)
+        if path == "/health":
+            # For HEAD, return an empty body; for GET, return "ok"
+            method = request_headers.get("Method") or request_headers.get(":method")
+            body = b"" if (method and method.upper() == "HEAD") else b"ok"
+            return (http.HTTPStatus.OK, [("Content-Type", "text/plain")], body)
+
+        # (Optional) Return 200 on "/" to make browser tests friendlier
+        if path == "/":
+            return (http.HTTPStatus.OK, [("Content-Type", "text/plain")], b"WS backend\n")
+
+        # For all other non-WS HTTP requests
+        return (http.HTTPStatus.METHOD_NOT_ALLOWED, [], b"websocket only\n")
 
 class DashScopeCallback(OmniRealtimeCallback):
     def __init__(self, frontend_websocket, event_loop):
