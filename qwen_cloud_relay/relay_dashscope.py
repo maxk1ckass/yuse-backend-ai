@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-DashScope WebSocket Relay Server
-- Accepts a browser WebSocket (no headers) on ws://<host>:8001
-- Opens a DashScope Realtime connection with Authorization header (via SDK)
-- Sets persistent "instructions" (system prompt) in session.update
-- Enables server VAD + create_response so the model replies after user pauses
+DashScope WebSocket Relay Server (minimal + robust)
+- Accepts browser WS on ws://<host>:8001
+- Opens DashScope Realtime connection via official SDK
+- Applies ONLY 'instructions' (system prompt) to session to avoid enum/type traps
 - Relays events bidirectionally
 
 ENV (.env):
   DASHSCOPE_API_KEY=sk-...
-  DASHSCOPE_BACKEND_URL=dashscope-intl.aliyuncs.com   # or dashscope.aliyuncs.com (CN)
+  DASHSCOPE_BACKEND_URL=dashscope-intl.aliyuncs.com   # or dashscope.aliyuncs.com
   RELAY_PORT=8001
   DASHSCOPE_MODEL=qwen-omni-turbo-realtime-latest
 """
@@ -29,8 +28,6 @@ import dashscope
 from dashscope.audio.qwen_omni import (
     OmniRealtimeConversation,
     OmniRealtimeCallback,
-    MultiModality,
-    AudioFormat,
 )
 
 # -----------------------------------------------------------------------------
@@ -39,7 +36,7 @@ from dashscope.audio.qwen_omni import (
 load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s.%(msecs)03d %(levelname)s %(message)s",
+    format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("dashscope-relay")
@@ -67,7 +64,7 @@ active_connections: Set[Any] = set()
 dashscope_conversations: Dict[Any, OmniRealtimeConversation] = {}
 
 # -----------------------------------------------------------------------------
-# System context (instructions)
+# System context (instructions only — no enums)
 # -----------------------------------------------------------------------------
 INSTRUCTIONS = """You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios.
 
@@ -100,7 +97,7 @@ class RelayCallback(OmniRealtimeCallback):
         logger.error("[DashScope] error: %s", error)
 
     def on_event(self, response: dict) -> None:
-        # Forward every event to the browser client
+        # Forward every event to the browser client unchanged
         try:
             if self.loop and not self.loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
@@ -125,7 +122,6 @@ async def handle_client(client_ws: Any, path: str | None = None):
     active_connections.add(client_ws)
     loop = asyncio.get_event_loop()
 
-    # Newer websockets expose .path on the connection object
     conn_path = getattr(client_ws, "path", path)
     logger.info("Client connected: %s %s", getattr(client_ws, "remote_address", None), conn_path)
 
@@ -142,33 +138,20 @@ async def handle_client(client_ws: Any, path: str | None = None):
         dashscope_conversations[client_ws] = conversation
         logger.info("Connected to DashScope.")
 
-        # Session config: put your SYSTEM prompt in `instructions`
-        conversation.update_session(
-            instructions=INSTRUCTIONS,
-            output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
-            voice="Chelsie",
-            input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
-            output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
-            enable_input_audio_transcription=True,
-            input_audio_transcription_model="gummy-realtime-v1",
-            enable_turn_detection=True,
-            turn_detection_type="server_vad",
-            turn_detection_threshold=0.5,
-            turn_detection_prefix_padding_ms=300,
-            turn_detection_silence_duration_ms=600,
-            create_response=True,   # auto-generate replies on user pause
-            interrupt_response=True # allow barge-in
-        )
-
-        # Optional: have Yuni greet immediately
+        # ✅ Only set instructions — keep everything else default (this matches your working setup)
         try:
-            conversation.append_text(
-                "Greet the student warmly and ask how many people are in their party today."
-            )
-            # If your SDK exposes an explicit trigger:
-            # conversation.create_response()
-        except Exception:
-            pass
+            conversation.update_session(instructions=INSTRUCTIONS)
+        except Exception as e:
+            logger.error("session.update (instructions) failed: %s", e)
+
+        # Optional: greet and trigger a response (leave commented if you want silence until user speaks)
+        # try:
+        #     conversation.append_text(
+        #         "Hello! Let's practice ordering at a restaurant. Would you like to be the waiter/waitress or the customer?"
+        #     )
+        #     conversation.create_response()
+        # except Exception:
+        #     pass
 
         # Relay messages from browser to DashScope
         async for raw in client_ws:
@@ -181,28 +164,15 @@ async def handle_client(client_ws: Any, path: str | None = None):
             msg_type = data.get("type")
 
             if msg_type == "session.update":
-                # Allow the client to override/extend session settings at runtime
+                # Only instructions are guaranteed safe (avoid enums)
                 session = data.get("session", {})
-                instructions = session.get("instructions", INSTRUCTIONS)
-                try:
-                    conversation.update_session(
-                        instructions=instructions,
-                        output_modalities=session.get("modalities", [MultiModality.AUDIO, MultiModality.TEXT]),
-                        voice=session.get("voice", "Chelsie"),
-                        input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
-                        output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
-                        enable_input_audio_transcription=True,
-                        input_audio_transcription_model=session.get("input_audio_transcription", {}).get("model", "gummy-realtime-v1"),
-                        enable_turn_detection=True,
-                        turn_detection_type=session.get("turn_detection", {}).get("type", "server_vad"),
-                        turn_detection_threshold=session.get("turn_detection", {}).get("threshold", 0.5),
-                        turn_detection_prefix_padding_ms=session.get("turn_detection", {}).get("prefix_padding_ms", 300),
-                        turn_detection_silence_duration_ms=session.get("turn_detection", {}).get("silence_duration_ms", 600),
-                        create_response=True,
-                        interrupt_response=True,
-                    )
-                except Exception as e:
-                    logger.error("session.update failed: %s", e)
+                instructions = session.get("instructions")
+                if instructions:
+                    try:
+                        conversation.update_session(instructions=instructions)
+                    except Exception as e:
+                        logger.error("session.update (instructions) failed: %s", e)
+                # Ignore other fields here to avoid enum/type mismatches.
 
             elif msg_type == "input_audio_buffer.append":
                 b64 = data.get("audio")
@@ -233,7 +203,7 @@ async def handle_client(client_ws: Any, path: str | None = None):
                         logger.error("append_text failed: %s", e)
 
             else:
-                # Ignore unknown UI-only messages
+                # Unknown UI-only message: ignore
                 pass
 
     except Exception as e:
@@ -259,7 +229,7 @@ async def handle_client(client_ws: Any, path: str | None = None):
 async def main():
     logger.info("Starting relay on ws://0.0.0.0:%d", RELAY_PORT)
     server = await websockets.serve(
-        handle_client,              # handler now accepts (ws) or (ws, path)
+        handle_client,              # handler accepts (ws) or (ws, path)
         host="0.0.0.0",
         port=RELAY_PORT,
         ping_interval=20,
