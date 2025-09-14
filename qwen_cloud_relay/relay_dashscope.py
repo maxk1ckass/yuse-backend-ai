@@ -173,6 +173,7 @@ START BY::
                 path = getattr(request, "path", "/")
                 logger.info(f"HTTP probe on {path}")
 
+                # 1) Health check: still 200 OK (Front Door / your curl)
                 if path == "/health":
                     body = getattr(self, "health_probe_health_message", "ok").encode("utf-8")
                     h = Headers()
@@ -180,17 +181,25 @@ START BY::
                     h["cache-control"] = "no-store"
                     return make_response(http.HTTPStatus.OK, h, body)
 
+                # 2) WebSocket endpoint on "/" — DO NOT return an HTTP response.
+                # Returning None tells websockets to continue the WS handshake.
                 if path == "/":
-                    h = Headers()
-                    h["content-type"] = "text/plain"
-                    h["cache-control"] = "no-store"
-                    return make_response(http.HTTPStatus.OK, h, b"WS backend\n")
+                    # If it's a true WS handshake, proceed:
+                    # (Optional) Only gate on Upgrade header:
+                    # up = (request.headers.get("upgrade") or request.headers.get("Upgrade") or "").lower()
+                    # if up == "websocket":
+                    #     return None
+                    return None  # <— let WS handshake happen
 
-                # Non-WS HTTP to other paths -> hint upgrade
+                # 3) Any other plain HTTP paths: hint upgrade
                 h = Headers()
                 h["content-type"] = "text/plain"
                 h["connection"] = "close"
-                return make_response(http.HTTPStatus.UPGRADE_REQUIRED, h, b"WebSocket endpoint. Use WS/WSS.\n")
+                return make_response(
+                    http.HTTPStatus.UPGRADE_REQUIRED,
+                    h,
+                    b"WebSocket endpoint. Use WS/WSS.\n",
+                )
 
             except Exception as e:
                 logger.exception(f"process_request error: {e}")
