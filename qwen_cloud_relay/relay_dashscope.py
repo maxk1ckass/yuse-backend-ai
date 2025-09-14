@@ -2,7 +2,7 @@
 """
 DashScope WebSocket Relay Server
 - Accepts a browser WebSocket (no headers) on ws://<host>:8001
-- Opens a DashScope Realtime connection with Authorization header
+- Opens a DashScope Realtime connection with Authorization header (via SDK)
 - Sets persistent "instructions" (system prompt) in session.update
 - Enables server VAD + create_response so the model replies after user pauses
 - Relays events bidirectionally
@@ -23,7 +23,6 @@ import sys
 from typing import Any, Dict, Set
 
 import websockets
-from websockets.server import WebSocketServerProtocol
 from dotenv import load_dotenv
 
 import dashscope
@@ -62,13 +61,13 @@ logger.info("Realtime WS URL: %s", DASHSCOPE_WS_URL)
 logger.info("Model: %s", DASHSCOPE_MODEL)
 
 # -----------------------------------------------------------------------------
-# Global connection tracking (optional, handy for cleanup/metrics)
+# Global connection tracking (optional)
 # -----------------------------------------------------------------------------
-active_connections: Set[WebSocketServerProtocol] = set()
-dashscope_conversations: Dict[WebSocketServerProtocol, OmniRealtimeConversation] = {}
+active_connections: Set[Any] = set()
+dashscope_conversations: Dict[Any, OmniRealtimeConversation] = {}
 
 # -----------------------------------------------------------------------------
-# Fixed system context for the session
+# System context (instructions)
 # -----------------------------------------------------------------------------
 INSTRUCTIONS = """You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios.
 
@@ -87,7 +86,7 @@ THE WAY TO INTERACT WITH THE STUDENT:
 # DashScope callback → forwards server events to the browser
 # -----------------------------------------------------------------------------
 class RelayCallback(OmniRealtimeCallback):
-    def __init__(self, client_ws: WebSocketServerProtocol, loop: asyncio.AbstractEventLoop):
+    def __init__(self, client_ws: Any, loop: asyncio.AbstractEventLoop):
         self.client_ws = client_ws
         self.loop = loop
 
@@ -111,7 +110,7 @@ class RelayCallback(OmniRealtimeCallback):
             logger.error("Callback forward error: %s", e)
 
     async def _send_to_client(self, obj: dict):
-        if self.client_ws.closed:
+        if getattr(self.client_ws, "closed", True):
             return
         try:
             await self.client_ws.send(json.dumps(obj))
@@ -119,30 +118,31 @@ class RelayCallback(OmniRealtimeCallback):
             logger.error("send to client failed: %s", e)
 
 # -----------------------------------------------------------------------------
-# Per-client handler
+# Per-client handler (compatible with websockets ≥11 and legacy)
 # -----------------------------------------------------------------------------
-async def handle_client(client_ws: WebSocketServerProtocol, path: str):
+async def handle_client(client_ws: Any, path: str | None = None):
     """Bridge a single browser WS to a single DashScope Realtime conversation."""
     active_connections.add(client_ws)
     loop = asyncio.get_event_loop()
-    logger.info("Client connected: %s %s", client_ws.remote_address, path)
 
-    # Create DashScope conversation
-    conversation = None
+    # Newer websockets expose .path on the connection object
+    conn_path = getattr(client_ws, "path", path)
+    logger.info("Client connected: %s %s", getattr(client_ws, "remote_address", None), conn_path)
+
+    conversation: OmniRealtimeConversation | None = None
     try:
         callback = RelayCallback(client_ws, loop)
         conversation = OmniRealtimeConversation(
             model=DASHSCOPE_MODEL,
             callback=callback,
-            url=DASHSCOPE_WS_URL,  # picks region from env
+            url=DASHSCOPE_WS_URL,
         )
         logger.info("Connecting to DashScope...")
-        conversation.connect()  # this sets up the auth header internally (via sdk)
+        conversation.connect()
         dashscope_conversations[client_ws] = conversation
         logger.info("Connected to DashScope.")
 
-        # Set session configuration with SYSTEM context + server VAD
-        # IMPORTANT: instructions goes here (system prompt), not append_text
+        # Session config: put your SYSTEM prompt in `instructions`
         conversation.update_session(
             instructions=INSTRUCTIONS,
             output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
@@ -160,12 +160,12 @@ async def handle_client(client_ws: WebSocketServerProtocol, path: str):
             interrupt_response=True # allow barge-in
         )
 
-        # OPTIONAL: have Yuni greet immediately (comment out if you prefer silence until user talks)
+        # Optional: have Yuni greet immediately
         try:
             conversation.append_text(
                 "Greet the student warmly and ask how many people are in their party today."
             )
-            # Some SDK builds also expose an explicit trigger; if available, you can call it:
+            # If your SDK exposes an explicit trigger:
             # conversation.create_response()
         except Exception:
             pass
@@ -180,36 +180,31 @@ async def handle_client(client_ws: WebSocketServerProtocol, path: str):
 
             msg_type = data.get("type")
 
-            # Allow the client to override/extend session settings at runtime
             if msg_type == "session.update":
+                # Allow the client to override/extend session settings at runtime
                 session = data.get("session", {})
-                # If frontend supplies its own instructions, merge/override
                 instructions = session.get("instructions", INSTRUCTIONS)
-
-                # Build kwargs carefully, falling back to current defaults
-                kwargs = {
-                    "instructions": instructions,
-                    "output_modalities": session.get("modalities", [MultiModality.AUDIO, MultiModality.TEXT]),
-                    "voice": session.get("voice", "Chelsie"),
-                    "input_audio_format": AudioFormat.PCM_16000HZ_MONO_16BIT,
-                    "output_audio_format": AudioFormat.PCM_24000HZ_MONO_16BIT,
-                    "enable_input_audio_transcription": True,
-                    "input_audio_transcription_model": session.get("input_audio_transcription", {}).get("model", "gummy-realtime-v1"),
-                    "enable_turn_detection": True,
-                    "turn_detection_type": session.get("turn_detection", {}).get("type", "server_vad"),
-                    "turn_detection_threshold": session.get("turn_detection", {}).get("threshold", 0.5),
-                    "turn_detection_prefix_padding_ms": session.get("turn_detection", {}).get("prefix_padding_ms", 300),
-                    "turn_detection_silence_duration_ms": session.get("turn_detection", {}).get("silence_duration_ms", 600),
-                    "create_response": True,
-                    "interrupt_response": True,
-                }
                 try:
-                    conversation.update_session(**kwargs)
+                    conversation.update_session(
+                        instructions=instructions,
+                        output_modalities=session.get("modalities", [MultiModality.AUDIO, MultiModality.TEXT]),
+                        voice=session.get("voice", "Chelsie"),
+                        input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                        output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                        enable_input_audio_transcription=True,
+                        input_audio_transcription_model=session.get("input_audio_transcription", {}).get("model", "gummy-realtime-v1"),
+                        enable_turn_detection=True,
+                        turn_detection_type=session.get("turn_detection", {}).get("type", "server_vad"),
+                        turn_detection_threshold=session.get("turn_detection", {}).get("threshold", 0.5),
+                        turn_detection_prefix_padding_ms=session.get("turn_detection", {}).get("prefix_padding_ms", 300),
+                        turn_detection_silence_duration_ms=session.get("turn_detection", {}).get("silence_duration_ms", 600),
+                        create_response=True,
+                        interrupt_response=True,
+                    )
                 except Exception as e:
                     logger.error("session.update failed: %s", e)
 
             elif msg_type == "input_audio_buffer.append":
-                # Audio is base64 PCM16 from the browser
                 b64 = data.get("audio")
                 if b64:
                     try:
@@ -218,21 +213,18 @@ async def handle_client(client_ws: WebSocketServerProtocol, path: str):
                         logger.error("append_audio failed: %s", e)
 
             elif msg_type == "input_audio_buffer.commit":
-                # Needed only if you run WITHOUT server_vad or want manual control
                 try:
                     conversation.commit_audio()
                 except Exception as e:
                     logger.error("commit_audio failed: %s", e)
 
             elif msg_type == "response.create":
-                # Manually trigger a response (useful if server_vad disabled)
                 try:
                     conversation.create_response()
                 except Exception as e:
                     logger.error("create_response failed: %s", e)
 
             elif msg_type == "conversation.append_text":
-                # Optional helper to add a text message from the user side
                 txt = data.get("text", "")
                 if txt:
                     try:
@@ -241,14 +233,13 @@ async def handle_client(client_ws: WebSocketServerProtocol, path: str):
                         logger.error("append_text failed: %s", e)
 
             else:
-                # Unknown or UI-only messages are ignored
+                # Ignore unknown UI-only messages
                 pass
 
     except Exception as e:
         logger.error("Client handler error: %s", e)
 
     finally:
-        # Cleanup
         if conversation is not None:
             try:
                 conversation.close()
@@ -268,12 +259,12 @@ async def handle_client(client_ws: WebSocketServerProtocol, path: str):
 async def main():
     logger.info("Starting relay on ws://0.0.0.0:%d", RELAY_PORT)
     server = await websockets.serve(
-        handle_client,
+        handle_client,              # handler now accepts (ws) or (ws, path)
         host="0.0.0.0",
         port=RELAY_PORT,
         ping_interval=20,
         ping_timeout=10,
-        max_size=2**22,  # ~4MB; enough for audio frames
+        max_size=2**22,             # ~4MB for audio frames
     )
     logger.info("✅ Relay running. Forwarding to %s (model=%s)", DASHSCOPE_WS_URL, DASHSCOPE_MODEL)
     await server.wait_closed()
