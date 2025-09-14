@@ -150,15 +150,25 @@ START BY::
         logger.info(f"Starting DashScope relay server on port {self.port}")
         logger.info(f"DashScope API Key: {DASHSCOPE_API_KEY[:10]}...")
 
+        def make_response(status: int | http.HTTPStatus, headers=None, body: bytes = b""):
+            # websockets.http11.Response(status_code, reason_phrase: bytes, headers, body)
+            if isinstance(status, http.HTTPStatus):
+                code = status.value
+                reason = status.phrase.encode("ascii")
+            else:
+                code = int(status)
+                reason = http.HTTPStatus(code).phrase.encode("ascii")
+            return Response(code, reason, headers or [], body)
+
         async def process_request(protocol, request):
             try:
                 path = getattr(request, "path", "/")
                 logger.info(f"HTTP probe on {path}")
 
                 if path == "/health":
-                    body = getattr(self, "health_message", "ok").encode("utf-8")
-                    return Response(
-                        200,
+                    body = getattr(self, "health_probe_health_message", "ok").encode("utf-8")
+                    return make_response(
+                        http.HTTPStatus.OK,
                         headers=[
                             (b"content-type", b"text/plain"),
                             (b"cache-control", b"no-store"),
@@ -167,8 +177,8 @@ START BY::
                     )
 
                 if path == "/":
-                    return Response(
-                        200,
+                    return make_response(
+                        http.HTTPStatus.OK,
                         headers=[
                             (b"content-type", b"text/plain"),
                             (b"cache-control", b"no-store"),
@@ -176,19 +186,20 @@ START BY::
                         body=b"WS backend\n",
                     )
 
-                # Non-WS HTTP on other paths -> hint upgrade
-                return Response(
-                    426,  # UPGRADE_REQUIRED
+                # Non-WS HTTP to other paths: hint upgrade
+                return make_response(
+                    http.HTTPStatus.UPGRADE_REQUIRED,   # 426
                     headers=[
                         (b"content-type", b"text/plain"),
                         (b"connection", b"close"),
                     ],
                     body=b"WebSocket endpoint. Use WS/WSS.\n",
                 )
+
             except Exception as e:
                 logger.exception(f"process_request error: {e}")
-                return Response(
-                    500,
+                return make_response(
+                    http.HTTPStatus.INTERNAL_SERVER_ERROR,
                     headers=[(b"content-type", b"text/plain")],
                     body=b"internal error\n",
                 )
