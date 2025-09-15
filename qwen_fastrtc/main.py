@@ -3,7 +3,8 @@ import os
 import re
 import time
 import threading
-from typing import Generator, Tuple
+import json
+from typing import Generator, Tuple, Dict, Any
 
 import numpy as np
 from fastapi import FastAPI
@@ -103,11 +104,82 @@ except Exception as e:
     model = None
 
 # ----------------------------
-# SYSTEM PROMPT
+# SYSTEM PROMPT & PROMPT MANAGEMENT
 # ----------------------------
-SYSTEM_PROMPT = (
+DEFAULT_SYSTEM_PROMPT = (
     "You are a restraurant waiter and I'm the customer. Please greeting me, ask me questions and serve me like a real waiter. Please keep in mind you never speak long sentences. Each of your response should be less than 20 words."
 )
+
+# Store current prompts per session
+current_prompts: Dict[str, Dict[str, Any]] = {}
+
+def get_current_prompt(session_id: str = "default") -> Dict[str, Any]:
+    """Get current prompt for session"""
+    return current_prompts.get(session_id, {
+        "systemPrompt": "You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios.",
+        "instructions": "Be encouraging and provide gentle corrections when needed.",
+        "context": "",
+        "scenario": "",
+        "personality": "friendly, patient, encouraging",
+        "language": "english",
+        "difficulty": "beginner"
+        # Note: role is optional - let conversation determine role naturally
+    })
+
+def update_prompt(session_id: str, prompt_data: Dict[str, Any]):
+    """Update prompt for session - merges with existing prompt data"""
+    current_prompt = get_current_prompt(session_id)
+    merged_prompt = {**current_prompt, **prompt_data}
+    current_prompts[session_id] = merged_prompt
+    print(f"Updated prompt for session {session_id}: {merged_prompt}")
+
+def initialize_prompt_from_offer(session_id: str, prompt_config: Dict[str, Any]):
+    """Initialize prompt from WebRTC offer"""
+    if prompt_config:
+        current_prompts[session_id] = prompt_config
+        print(f"Initialized prompt for session {session_id} from offer: {current_prompts[session_id]}")
+    else:
+        print(f"No prompt config in offer, using default for session {session_id}")
+
+def generate_system_prompt_from_data(prompt_data: Dict[str, Any]) -> str:
+    """Generate system prompt from prompt data"""
+    system_prompt = prompt_data.get('systemPrompt', 'You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios.')
+    instructions = prompt_data.get('instructions', 'Be encouraging and provide gentle corrections when needed.')
+    context = prompt_data.get('context', '')
+    personality = prompt_data.get('personality', 'friendly, patient, encouraging')
+    difficulty = prompt_data.get('difficulty', 'beginner')
+    role = prompt_data.get('role')  # Optional - let conversation determine role
+    scenario = prompt_data.get('scenario', '')
+    
+    # Build base prompt
+    full_prompt = f"{system_prompt} {instructions}"
+    if context:
+        full_prompt += f" {context}"
+    full_prompt += "."
+    
+    # Add role-specific instructions only if role is explicitly provided
+    if role:
+        if scenario:
+            role_instructions = f" You are the {role} in this {scenario} scenario."
+        else:
+            role_instructions = f" You are the {role} in this scenario."
+        
+        if role == 'waiter':
+            role_instructions += " Take orders, suggest menu items, and provide excellent service. Be helpful and professional."
+        elif role == 'customer':
+            role_instructions += " Order food, ask questions about the menu, and interact naturally with the waiter."
+        full_prompt += role_instructions
+    
+    # Add personality and response guidelines
+    if personality:
+        full_prompt += f" Personality: {personality}."
+    full_prompt += f" Keep vocabulary {difficulty} level. Each response should be less than 20 words."
+    
+    # Add role flexibility instruction when no specific role is set
+    if not role:
+        full_prompt += f" Adapt your role based on the conversation context as needed."
+    
+    return full_prompt
 
 # ----------------------------
 # Anti-feedback + reentrancy state
@@ -140,15 +212,19 @@ def is_self_echo(stt_text: str, ai_text: str) -> bool:
 def silence_chunk(seconds: float = 0.25, sr: int = 16000) -> Tuple[int, np.ndarray]:
     return (sr, np.zeros(int(sr * seconds), dtype=np.int16))
 
-def run_llm(user_text: str) -> str:
+def run_llm(user_text: str, session_id: str = "default") -> str:
     """Memory-frugal generation to avoid second-turn VRAM spikes."""
     if not user_text or not user_text.strip():
         return "Sorry, I didn't catch that. Please try again."
     if model is None or tokenizer is None:
         return "AI model is not available. Please check your model installation."
 
+    # Get current prompt for session
+    current_prompt_data = get_current_prompt(session_id)
+    system_prompt = generate_system_prompt_from_data(current_prompt_data)
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "system", "content": "Session memory: Last time we practiced ordering food; the student asked about salmon vs pasta and requested a side salad."},
         {"role": "user", "content": user_text},
     ]
@@ -187,6 +263,41 @@ def run_llm(user_text: str) -> str:
         pass
 
     return text
+
+# ----------------------------
+# Data Channel Handling
+# ----------------------------
+def handle_data_channel_message(message: str, session_id: str = "default"):
+    """Handle control messages from data channel"""
+    try:
+        data = json.loads(message)
+        message_type = data.get('type')
+        
+        if message_type == 'control.prompt.update':
+            prompt_data = data.get('prompt', {})
+            update_prompt(session_id, prompt_data)
+            print(f"Prompt updated for session {session_id}")
+        elif message_type == 'control.role.switch':
+            roles = data.get('roles', {})
+            role_prompt = {
+                'context': f"We are practicing restaurant ordering scenarios. You are the {roles.get('ai', 'waiter')}, the student is the {roles.get('user', 'customer')}.",
+                'role': roles.get('ai', 'waiter')
+            }
+            update_prompt(session_id, role_prompt)
+            print(f"Role switched for session {session_id}: {roles}")
+        elif message_type == 'control.session.init':
+            # Handle initial session setup with prompt config
+            prompt_config = data.get('prompt_config', {})
+            if prompt_config:
+                initialize_prompt_from_offer(session_id, prompt_config)
+                print(f"Session initialized with prompt config for {session_id}")
+        else:
+            print(f"Unhandled data channel message type: {message_type}")
+            
+    except json.JSONDecodeError:
+        print(f"Invalid JSON in data channel message: {message}")
+    except Exception as e:
+        print(f"Error handling data channel message: {e}")
 
 # ----------------------------
 # Audio pipeline
@@ -304,8 +415,9 @@ if fastrtc_ok:
                 handler=ReplyOnPause(respond, can_interrupt=False),
                 modality="audio",
                 mode="send-receive",
+                data_channel_handler=handle_data_channel_message,  # Add data channel handler
             )
-            print("Using ReplyOnPause with VAD")
+            print("Using ReplyOnPause with VAD and data channel support")
         else:
             def no_vad_handler(audio):
                 try:
@@ -319,8 +431,9 @@ if fastrtc_ok:
                 handler=no_vad_handler,
                 modality="audio",
                 mode="send-receive",
+                data_channel_handler=handle_data_channel_message,  # Add data channel handler
             )
-            print("Using simple no-VAD handler")
+            print("Using simple no-VAD handler with data channel support")
         stream.mount(app)
     except Exception as e:
         print(f"Failed to initialize FastRTC Stream: {e}")

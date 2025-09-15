@@ -44,11 +44,103 @@ logger.info(f"WebSocket URL: {DASHSCOPE_WS_URL}")
 # Store active connections
 active_connections: Set[Any] = set()
 dashscope_conversations: Dict[Any, OmniRealtimeConversation] = {}
+current_prompts: Dict[Any, Dict[str, Any]] = {}  # Store current prompts per connection
 
 class DashScopeRelay:
     def __init__(self):
         self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
         self.health_probe_health_message = "ok"  # whatever class data you want
+        
+    def generate_instructions_from_prompt(self, prompt_data: Dict[str, Any]) -> str:
+        """Generate full instructions from prompt data"""
+        system_prompt = prompt_data.get('systemPrompt', 'You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios.')
+        instructions = prompt_data.get('instructions', 'Be encouraging and provide gentle corrections when needed.')
+        context = prompt_data.get('context', '')
+        personality = prompt_data.get('personality', 'friendly, patient, encouraging')
+        difficulty = prompt_data.get('difficulty', 'beginner')
+        scenario = prompt_data.get('scenario', '')
+        role = prompt_data.get('role')  # Optional - let conversation determine role
+        
+        # Build base instructions
+        full_instructions = f"{system_prompt} {instructions}"
+        if context:
+            full_instructions += f" {context}"
+        full_instructions += "."
+        
+        # Add role-specific instructions only if role is explicitly provided
+        if role:
+            if scenario:
+                role_instructions = f" You are the {role} in this {scenario} scenario."
+            else:
+                role_instructions = f" You are the {role} in this scenario."
+            
+            if role == 'waiter':
+                role_instructions += " Take orders, suggest menu items, and provide excellent service. Be helpful and professional."
+            elif role == 'customer':
+                role_instructions += " Order food, ask questions about the menu, and interact naturally with the waiter."
+            full_instructions += role_instructions
+        
+        # Add personality and interaction guidelines
+        if personality:
+            full_instructions += f" Personality: {personality}."
+        full_instructions += f" Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary {difficulty} level, natural and conversational."
+        
+        # Add role flexibility instruction when no specific role is set
+        if not role:
+            full_instructions += f" Adapt your role based on the conversation context as needed."
+        
+        return full_instructions
+    
+    async def handle_prompt_update(self, websocket, prompt_data: Dict[str, Any]):
+        """Handle prompt update message"""
+        try:
+            # If conversation exists, update it
+            if websocket in dashscope_conversations:
+                conversation = dashscope_conversations[websocket]
+                
+                # Get current prompt data to preserve context before updating
+                current_prompt = current_prompts.get(websocket, {})
+                
+                # Merge current prompt with new prompt data (new data takes precedence)
+                merged_prompt = {**current_prompt, **prompt_data}
+                
+                # Store the merged prompt data
+                current_prompts[websocket] = merged_prompt
+                
+                # Generate comprehensive instructions that include all context
+                new_instructions = self.generate_instructions_from_prompt(merged_prompt)
+                
+                # Update session with new instructions (this replaces the previous instructions)
+                conversation.update_session(
+                    instructions=new_instructions
+                )
+                
+                logger.info(f"Updated instructions for connection {websocket.remote_address}")
+                logger.debug(f"New instructions: {new_instructions}")
+                
+                # Send confirmation back to frontend
+                response = {
+                    "type": "control.prompt.updated",
+                    "success": True,
+                    "message": "Prompt updated successfully",
+                    "appliedPrompt": {
+                        "systemPrompt": prompt_data.get('systemPrompt'),
+                        "instructions": prompt_data.get('instructions'),
+                        "context": prompt_data.get('context')
+                    }
+                }
+                await websocket.send(json.dumps(response))
+            else:
+                logger.warning(f"No conversation found for websocket {websocket.remote_address}")
+                
+        except Exception as e:
+            logger.error(f"Error handling prompt update: {e}")
+            error_response = {
+                "type": "error",
+                "code": "prompt_update_failed",
+                "message": f"Failed to update prompt: {str(e)}"
+            }
+            await websocket.send(json.dumps(error_response))
         
     async def handle_frontend_connection(self, websocket, path=None):
         """Handle connection from frontend"""
@@ -70,7 +162,9 @@ class DashScopeRelay:
             dashscope_conversations[websocket] = conversation
             logger.info("Successfully connected to DashScope")
             
-            # Configure session with restaurant ordering context
+            # Configure session with generic default instructions
+            default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed."""
+
             conversation.update_session(
                 output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
                 voice='Chelsie',
@@ -80,41 +174,7 @@ class DashScopeRelay:
                 input_audio_transcription_model='gummy-realtime-v1',
                 enable_turn_detection=True,
                 turn_detection_type='server_vad',
-                instructions="""You are Yuni, a friendly English instructor helping students practice restaurant ordering scenarios. 
-
-CONTEXT: You are teaching English through a restaurant ordering roleplay. The student is learning how to order food, ask questions about the menu, and interact with restaurant staff.
-
-THE SCRIPT:
-Waiter: Good evening! Welcome to Golden Dragon Restaurant. How many people are dining today?
-Customer: Just one, thank you.
-Waiter: Of course. Would you like to sit by the window or closer to the bar?
-Customer: By the window, please.
-Waiter: Here you are. Can I get you something to drink while you look at the menu?
-Customer: Yes, I’ll have a glass of water and a lemonade, please.
-Waiter: Certainly. Our soup of the day is pumpkin soup, and we also have a chef’s special stir-fry chicken. Would you like me to go over the menu highlights?
-Customer: Yes, that would be helpful.
-Waiter: For starters, we recommend dumplings, spring rolls, or the mixed platter. For mains, popular dishes are the grilled salmon, beef noodles, and the vegetarian fried rice.
-Customer: I think I’ll start with the dumplings.
-Waiter: Excellent choice. And for your main course?
-Customer: The grilled salmon with lemon butter, please.
-Waiter: Very good. Would you like any side dishes, such as steamed vegetables or extra rice?
-Customer: Steamed vegetables, please.
-Waiter: Noted. Do you have any dietary restrictions or allergies I should be aware of?
-Customer: No, I’m fine with everything.
-Waiter: Perfect. I’ll place your order.
-Customer: Thank you.
-
-THE WAY TO INTERACT WITH THE STUDENT:
-- Everytime, you speek a sentence, and wait for the student to speak the next turn
-- Finish the scenario script with the student turn by turn
-- Ask if the student want to switch roles after the scenario is finished
-- For each turn, you sentence should be short and not too complicated, the student is a beginner
-- We allow some open ended conversation, so if the student didn't stick to the scenario script, you can adjust your response
-
-START BY::
-- greeting the student warmly
-- let the student know we are going to recap the restaurant ordering task
-- ask the student if they want to play the customer role or the waiter role, then start the roleplay.."""
+                instructions=default_instructions
             )
             
             logger.info("Connected to DashScope cloud")
@@ -123,14 +183,37 @@ START BY::
             async for message in websocket:
                 try:
                     data = json.loads(message)
-                    if data.get('type') == 'session.update':
+                    message_type = data.get('type')
+                    
+                    if message_type == 'session.update':
                         # Frontend is sending session config - we already configured it
                         logger.info("Session configuration received from frontend")
-                    elif data.get('type') == 'input_audio_buffer.append':
+                    elif message_type == 'input_audio_buffer.append':
                         # Forward audio data to DashScope
                         audio_b64 = data.get('audio')
                         if audio_b64:
                             conversation.append_audio(audio_b64)
+                    elif message_type == 'control.prompt.update':
+                        # Handle prompt update
+                        prompt_data = data.get('prompt', {})
+                        await self.handle_prompt_update(websocket, prompt_data)
+                    elif message_type == 'control.session.config':
+                        # Handle session configuration update
+                        config_data = data.get('config', {})
+                        logger.info(f"Session config update received: {config_data}")
+                    elif message_type == 'control.role.switch':
+                        # Handle role switching
+                        roles = data.get('roles', {})
+                        logger.info(f"Role switch requested: {roles}")
+                        # Convert role switch to prompt update
+                        role_prompt = {
+                            'context': f"We are practicing restaurant ordering scenarios. You are the {roles.get('ai', 'waiter')}, the student is the {roles.get('user', 'customer')}.",
+                            'role': roles.get('ai', 'waiter')
+                        }
+                        await self.handle_prompt_update(websocket, role_prompt)
+                    else:
+                        logger.info(f"Unhandled message type: {message_type}")
+                        
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON from frontend: {message}")
                 except Exception as e:
@@ -144,6 +227,8 @@ START BY::
             if websocket in dashscope_conversations:
                 dashscope_conversations[websocket].close()
                 del dashscope_conversations[websocket]
+            if websocket in current_prompts:
+                del current_prompts[websocket]
             logger.info(f"Frontend disconnected: {websocket.remote_address}")
     
     async def start_server(self):
