@@ -95,11 +95,37 @@ class DashScopeRelay:
         
         return full_instructions
     
+    def clean_text(self, text: str) -> str:
+        """Clean and normalize text for better readability"""
+        if not text:
+            return text
+        
+        # Remove extra whitespace and normalize
+        text = text.strip()
+        
+        # Add spaces between words that might be concatenated
+        import re
+        # Add space before capital letters that follow lowercase letters (camelCase)
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        # Add space before numbers that follow letters
+        text = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', text)
+        # Add space after numbers that are followed by letters
+        text = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', text)
+        
+        # Normalize multiple spaces to single spaces
+        text = re.sub(r'\s+', ' ', text)
+        
+        return text.strip()
+
     async def handle_session_end(self, websocket):
         """Handle session end and send conversation script"""
         try:
             if websocket in conversation_scripts:
                 script = conversation_scripts[websocket]
+                
+                # Clean up text in the script
+                for turn in script:
+                    turn['text'] = self.clean_text(turn['text'])
                 
                 # Format the script for frontend
                 script_data = {
@@ -378,6 +404,9 @@ class DashScopeCallback(OmniRealtimeCallback):
         try:
             response_type = response.get('type', '')
             
+            # Debug: Log all response types to understand the data flow
+            logger.debug(f"DashScope response type: {response_type}")
+            
             # Track user speech transcription
             if response_type == 'conversation.item.input_audio_transcription.completed':
                 transcript = response.get('transcript', '').strip()
@@ -391,18 +420,47 @@ class DashScopeCallback(OmniRealtimeCallback):
                     if self.frontend_ws not in conversation_scripts:
                         conversation_scripts[self.frontend_ws] = []
                     conversation_scripts[self.frontend_ws].append(turn)
-                    logger.info(f"Tracked user speech: {transcript}")
+                    logger.info(f"Tracked user speech: '{transcript}'")
             
-            # Track AI response text (from audio transcript)
-            elif response_type == 'response.audio_transcript.delta':
+            # Track AI response text - try multiple possible response types
+            elif response_type in ['response.audio_transcript.delta', 'response.text.delta']:
                 ai_text = response.get('delta', '').strip()
+                logger.debug(f"AI text delta: '{ai_text}' (length: {len(ai_text)})")
+                
                 if ai_text:
                     # Check if this is a new response or continuation
                     if (self.frontend_ws in conversation_scripts and 
                         conversation_scripts[self.frontend_ws] and 
                         conversation_scripts[self.frontend_ws][-1]['speaker'] == 'ai'):
-                        # Append to existing AI turn
-                        conversation_scripts[self.frontend_ws][-1]['text'] += ai_text
+                        # Append to existing AI turn with better word boundary handling
+                        existing_text = conversation_scripts[self.frontend_ws][-1]['text']
+                        
+                        # Smart spacing logic
+                        if existing_text:
+                            # Check if we need to add a space
+                            needs_space = (
+                                not existing_text.endswith(' ') and 
+                                not existing_text.endswith('.') and 
+                                not existing_text.endswith(',') and 
+                                not existing_text.endswith('!') and 
+                                not existing_text.endswith('?') and 
+                                not existing_text.endswith(':') and 
+                                not existing_text.endswith(';') and
+                                not ai_text.startswith(' ') and
+                                not ai_text.startswith('.') and
+                                not ai_text.startswith(',') and
+                                not ai_text.startswith('!') and
+                                not ai_text.startswith('?')
+                            )
+                            
+                            if needs_space:
+                                conversation_scripts[self.frontend_ws][-1]['text'] += ' ' + ai_text
+                            else:
+                                conversation_scripts[self.frontend_ws][-1]['text'] += ai_text
+                        else:
+                            conversation_scripts[self.frontend_ws][-1]['text'] += ai_text
+                        
+                        logger.info(f"Appended AI response: '{ai_text}' -> Total: '{conversation_scripts[self.frontend_ws][-1]['text']}'")
                     else:
                         # Create new AI turn
                         turn = {
@@ -414,7 +472,32 @@ class DashScopeCallback(OmniRealtimeCallback):
                         if self.frontend_ws not in conversation_scripts:
                             conversation_scripts[self.frontend_ws] = []
                         conversation_scripts[self.frontend_ws].append(turn)
-                    logger.info(f"Tracked AI response: {ai_text}")
+                        logger.info(f"New AI response: '{ai_text}'")
+            
+            # Also check for complete AI responses
+            elif response_type == 'response.audio_transcript.completed':
+                complete_text = response.get('transcript', '').strip()
+                if complete_text:
+                    logger.info(f"Complete AI transcript: '{complete_text}'")
+                    # Use the complete transcript instead of delta chunks
+                    if (self.frontend_ws in conversation_scripts and 
+                        conversation_scripts[self.frontend_ws] and 
+                        conversation_scripts[self.frontend_ws][-1]['speaker'] == 'ai'):
+                        # Replace the last AI turn with the complete text
+                        conversation_scripts[self.frontend_ws][-1]['text'] = complete_text
+                        logger.info(f"Replaced AI response with complete transcript: '{complete_text}'")
+                    else:
+                        # Create new AI turn with complete text
+                        turn = {
+                            'speaker': 'ai',
+                            'text': complete_text,
+                            'timestamp': int(time.time() * 1000),
+                            'type': 'ai_response'
+                        }
+                        if self.frontend_ws not in conversation_scripts:
+                            conversation_scripts[self.frontend_ws] = []
+                        conversation_scripts[self.frontend_ws].append(turn)
+                        logger.info(f"New AI response (complete): '{complete_text}'")
                     
         except Exception as e:
             logger.error(f"Error tracking conversation text: {e}")
