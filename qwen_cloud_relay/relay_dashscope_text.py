@@ -150,28 +150,36 @@ class DashScopeRelay:
     async def handle_prompt_update(self, websocket, prompt_data: Dict[str, Any]):
         """Handle prompt update message"""
         try:
+            logger.info("=== BACKEND: Handling prompt update ===")
+            logger.info(f"Received prompt data: {prompt_data}")
+            
             # If conversation exists, update it
             if websocket in dashscope_conversations:
                 conversation = dashscope_conversations[websocket]
                 
                 # Get current prompt data to preserve context before updating
                 current_prompt = current_prompts.get(websocket, {})
+                logger.info(f"Current prompt data: {current_prompt}")
                 
                 # Merge current prompt with new prompt data (new data takes precedence)
                 merged_prompt = {**current_prompt, **prompt_data}
+                logger.info(f"Merged prompt data: {merged_prompt}")
                 
                 # Store the merged prompt data
                 current_prompts[websocket] = merged_prompt
                 
                 # Generate comprehensive instructions that include all context
                 new_instructions = self.generate_instructions_from_prompt(merged_prompt)
+                logger.info(f"Generated new instructions length: {len(new_instructions)}")
+                logger.info(f"Generated new instructions preview: {new_instructions[:300]}...")
                 
                 # Update session with new instructions (this replaces the previous instructions)
+                logger.info("Updating DashScope conversation with new instructions...")
                 conversation.update_session(
                     instructions=new_instructions
                 )
                 
-                logger.info(f"Updated instructions for connection {websocket.remote_address}")
+                logger.info(f"✅ Updated instructions for connection {websocket.remote_address}")
                 logger.debug(f"New instructions: {new_instructions}")
                 
                 # Send confirmation back to frontend
@@ -183,14 +191,16 @@ class DashScopeRelay:
                         "systemPrompt": prompt_data.get('systemPrompt'),
                         "instructions": prompt_data.get('instructions'),
                         "context": prompt_data.get('context')
-                    }
+                    },
+                    "instructions_length": len(new_instructions)
                 }
                 await websocket.send(json.dumps(response))
+                logger.info("Sent prompt update confirmation to frontend")
             else:
                 logger.warning(f"No conversation found for websocket {websocket.remote_address}")
                 
         except Exception as e:
-            logger.error(f"Error handling prompt update: {e}")
+            logger.error(f"❌ Error handling prompt update: {e}")
             error_response = {
                 "type": "error",
                 "code": "prompt_update_failed",
@@ -242,8 +252,47 @@ class DashScopeRelay:
                     message_type = data.get('type')
                     
                     if message_type == 'session.update':
-                        # Frontend is sending session config - we already configured it
-                        logger.info("Session configuration received from frontend")
+                        # Frontend is sending session config - update with new instructions
+                        logger.info("=== BACKEND: Received session.update from frontend ===")
+                        session_data = data.get('session', {})
+                        frontend_instructions = session_data.get('instructions', '')
+                        
+                        logger.info(f"Frontend session data: {session_data}")
+                        logger.info(f"Frontend instructions length: {len(frontend_instructions)}")
+                        logger.info(f"Frontend instructions preview: {frontend_instructions[:200]}...")
+                        
+                        if frontend_instructions and websocket in dashscope_conversations:
+                            conversation = dashscope_conversations[websocket]
+                            logger.info("Updating DashScope conversation with frontend instructions...")
+                            
+                            try:
+                                conversation.update_session(
+                                    instructions=frontend_instructions
+                                )
+                                logger.info("✅ Successfully updated DashScope session with frontend instructions")
+                                
+                                # Send confirmation back to frontend
+                                response = {
+                                    "type": "session.updated",
+                                    "success": True,
+                                    "message": "Session updated with new instructions",
+                                    "instructions_length": len(frontend_instructions)
+                                }
+                                await websocket.send(json.dumps(response))
+                                logger.info("Sent session update confirmation to frontend")
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Failed to update DashScope session: {e}")
+                                error_response = {
+                                    "type": "session.update.error",
+                                    "success": False,
+                                    "message": f"Failed to update session: {str(e)}"
+                                }
+                                await websocket.send(json.dumps(error_response))
+                        else:
+                            logger.warning("No instructions provided or conversation not found")
+                            logger.warning(f"Has instructions: {bool(frontend_instructions)}")
+                            logger.warning(f"Has conversation: {websocket in dashscope_conversations}")
                     elif message_type == 'input_audio_buffer.append':
                         # Forward audio data to DashScope
                         audio_b64 = data.get('audio')
