@@ -90,7 +90,7 @@ class DashScopeRelay:
         # Add personality and interaction guidelines
         if personality:
             full_instructions += f" Personality: {personality}."
-        full_instructions += f" Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary {difficulty} level, natural and conversational."
+        full_instructions += f" Turn-taking: reply in 1�? short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary {difficulty} level, natural and conversational."
         
         # Add role flexibility instruction when no specific role is set
         if not role:
@@ -170,7 +170,7 @@ class DashScopeRelay:
                     
                     # Send the silent audio to trigger conversation
                     conversation.append_audio(silent_audio_b64)
-                    logger.info("✅ Triggered initial AI greeting with silent audio")
+                    logger.info("�?Triggered initial AI greeting with silent audio")
                     
                 except Exception as e:
                     logger.warning(f"Silent audio trigger failed: {e}")
@@ -189,7 +189,7 @@ class DashScopeRelay:
                         
                         tone_audio_b64 = base64.b64encode(audio_samples.tobytes()).decode('utf-8')
                         conversation.append_audio(tone_audio_b64)
-                        logger.info("✅ Triggered initial AI greeting with quiet tone")
+                        logger.info("�?Triggered initial AI greeting with quiet tone")
                         
                     except Exception as e2:
                         logger.error(f"All greeting trigger methods failed: {e2}")
@@ -281,7 +281,7 @@ class DashScopeRelay:
                         instructions=new_instructions
                     )
                 
-                logger.info(f"✅ Updated instructions for connection {websocket.remote_address}")
+                logger.info(f"�?Updated instructions for connection {websocket.remote_address}")
                 logger.debug(f"New instructions: {new_instructions}")
                 
                 # Send confirmation back to frontend
@@ -302,7 +302,7 @@ class DashScopeRelay:
                 logger.warning(f"No conversation found for websocket {websocket.remote_address}")
                 
         except Exception as e:
-            logger.error(f"❌ Error handling prompt update: {e}")
+            logger.error(f"�?Error handling prompt update: {e}")
             error_response = {
                 "type": "error",
                 "code": "prompt_update_failed",
@@ -331,7 +331,7 @@ class DashScopeRelay:
             logger.info("Successfully connected to DashScope")
             
             # Configure session with generic default instructions that include initial greeting
-            default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed.
+            default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1�? short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed.
 
 IMPORTANT: Start every conversation by greeting the student warmly and explaining what we're going to practice. Begin with: "Hello! I'm Yuni, your English instructor. Today we're going to practice [scenario]. Are you ready to start?""""
 
@@ -359,7 +359,7 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
                     "message": "Session is ready, AI can now greet the user",
                     "ready_for_initial_greeting": True
                 }))
-                logger.info("✅ Sent session ready message to frontend")
+                logger.info("�?Sent session ready message to frontend")
             except Exception as e:
                 logger.warning(f"Failed to send session ready message: {e}")
             
@@ -394,7 +394,7 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
                                 logger.info("Calling conversation.update_session with preserved parameters...")
                                 
                                 conversation.update_session(**stored_params)
-                                logger.info("✅ Successfully updated DashScope session with frontend instructions")
+                                logger.info("�?Successfully updated DashScope session with frontend instructions")
                                 
                                 # Update stored parameters with new instructions
                                 session_parameters[websocket] = stored_params
@@ -410,7 +410,7 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
                                 logger.info("Sent session update confirmation to frontend")
                                 
                             except Exception as e:
-                                logger.error(f"❌ Failed to update DashScope session: {e}")
+                                logger.error(f"�?Failed to update DashScope session: {e}")
                                 error_response = {
                                     "type": "session.update.error",
                                     "success": False,
@@ -512,7 +512,7 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
                     h["cache-control"] = "no-store"
                     return make_response(http.HTTPStatus.OK, h, body)
 
-                # 2) WebSocket endpoint on "/" — DO NOT return an HTTP response.
+                # 2) WebSocket endpoint on "/" �?DO NOT return an HTTP response.
                 # Returning None tells websockets to continue the WS handshake.
                 if path == "/":
                     # If it's a true WS handshake, proceed:
@@ -520,7 +520,7 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
                     # up = (request.headers.get("upgrade") or request.headers.get("Upgrade") or "").lower()
                     # if up == "websocket":
                     #     return None
-                    return None  # <— let WS handshake happen
+                    return None  # <�?let WS handshake happen
 
                 # 3) Any other plain HTTP paths: hint upgrade
                 h = Headers()
@@ -548,7 +548,7 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
             process_request=process_request
         )
         
-        logger.info(f"✅ DashScope relay server running on ws://localhost:{self.port}")
+        logger.info(f"�?DashScope relay server running on ws://localhost:{self.port}")
         logger.info("Ready to relay connections to DashScope cloud")
         
         # Keep server running
@@ -706,7 +706,7 @@ async def main():
     
     # Check API key
     if not DASHSCOPE_API_KEY or DASHSCOPE_API_KEY == 'sk-your-api-key-here':
-        logger.error("❌ DASHSCOPE_API_KEY not set!")
+        logger.error("�?DASHSCOPE_API_KEY not set!")
         logger.error("Please set DASHSCOPE_API_KEY in your .env file")
         sys.exit(1)
     
