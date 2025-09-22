@@ -50,6 +50,9 @@ current_prompts: Dict[Any, Dict[str, Any]] = {}  # Store current prompts per con
 # Store conversation scripts per session
 conversation_scripts: Dict[Any, list] = {}  # Store conversation turns per connection
 
+# Store session parameters per connection to preserve them during updates
+session_parameters: Dict[Any, Dict[str, Any]] = {}  # Store session config per connection
+
 class DashScopeRelay:
     def __init__(self):
         self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
@@ -175,9 +178,29 @@ class DashScopeRelay:
                 
                 # Update session with new instructions (this replaces the previous instructions)
                 logger.info("Updating DashScope conversation with new instructions...")
-                conversation.update_session(
-                    instructions=new_instructions
-                )
+                
+                if websocket in session_parameters:
+                    # Use stored session parameters and only update instructions
+                    stored_params = session_parameters[websocket].copy()
+                    stored_params['instructions'] = new_instructions
+                    logger.info(f"Updating with stored parameters: {list(stored_params.keys())}")
+                    conversation.update_session(**stored_params)
+                    # Update stored parameters
+                    session_parameters[websocket] = stored_params
+                else:
+                    # Fallback to default parameters (shouldn't happen in normal flow)
+                    logger.warning("No stored session parameters found, using fallback")
+                    conversation.update_session(
+                        output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+                        voice='Chelsie',
+                        input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                        output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                        enable_input_audio_transcription=True,
+                        input_audio_transcription_model='gummy-realtime-v1',
+                        enable_turn_detection=True,
+                        turn_detection_type='server_vad',
+                        instructions=new_instructions
+                    )
                 
                 logger.info(f"✅ Updated instructions for connection {websocket.remote_address}")
                 logger.debug(f"New instructions: {new_instructions}")
@@ -231,17 +254,21 @@ class DashScopeRelay:
             # Configure session with generic default instructions
             default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed."""
 
-            conversation.update_session(
-                output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
-                voice='Chelsie',
-                input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
-                output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
-                enable_input_audio_transcription=True,
-                input_audio_transcription_model='gummy-realtime-v1',
-                enable_turn_detection=True,
-                turn_detection_type='server_vad',
-                instructions=default_instructions
-            )
+            # Store the session parameters for future updates
+            session_params = {
+                'output_modalities': [MultiModality.AUDIO, MultiModality.TEXT],
+                'voice': 'Chelsie',
+                'input_audio_format': AudioFormat.PCM_16000HZ_MONO_16BIT,
+                'output_audio_format': AudioFormat.PCM_24000HZ_MONO_16BIT,
+                'enable_input_audio_transcription': True,
+                'input_audio_transcription_model': 'gummy-realtime-v1',
+                'enable_turn_detection': True,
+                'turn_detection_type': 'server_vad',
+                'instructions': default_instructions
+            }
+            session_parameters[websocket] = session_params
+
+            conversation.update_session(**session_params)
             
             logger.info("Connected to DashScope cloud")
             
@@ -261,15 +288,23 @@ class DashScopeRelay:
                         logger.info(f"Frontend instructions length: {len(frontend_instructions)}")
                         logger.info(f"Frontend instructions preview: {frontend_instructions[:200]}...")
                         
-                        if frontend_instructions and websocket in dashscope_conversations:
+                        if frontend_instructions and websocket in dashscope_conversations and websocket in session_parameters:
                             conversation = dashscope_conversations[websocket]
+                            stored_params = session_parameters[websocket].copy()
+                            
                             logger.info("Updating DashScope conversation with frontend instructions...")
+                            logger.info(f"Stored session parameters: {list(stored_params.keys())}")
                             
                             try:
-                                conversation.update_session(
-                                    instructions=frontend_instructions
-                                )
+                                # Update only the instructions while preserving all other parameters
+                                stored_params['instructions'] = frontend_instructions
+                                logger.info("Calling conversation.update_session with preserved parameters...")
+                                
+                                conversation.update_session(**stored_params)
                                 logger.info("✅ Successfully updated DashScope session with frontend instructions")
+                                
+                                # Update stored parameters with new instructions
+                                session_parameters[websocket] = stored_params
                                 
                                 # Send confirmation back to frontend
                                 response = {
@@ -290,9 +325,10 @@ class DashScopeRelay:
                                 }
                                 await websocket.send(json.dumps(error_response))
                         else:
-                            logger.warning("No instructions provided or conversation not found")
+                            logger.warning("No instructions provided or conversation/session parameters not found")
                             logger.warning(f"Has instructions: {bool(frontend_instructions)}")
                             logger.warning(f"Has conversation: {websocket in dashscope_conversations}")
+                            logger.warning(f"Has session parameters: {websocket in session_parameters}")
                     elif message_type == 'input_audio_buffer.append':
                         # Forward audio data to DashScope
                         audio_b64 = data.get('audio')
@@ -340,6 +376,8 @@ class DashScopeRelay:
                 del current_prompts[websocket]
             if websocket in conversation_scripts:
                 del conversation_scripts[websocket]
+            if websocket in session_parameters:
+                del session_parameters[websocket]
             logger.info(f"Frontend disconnected: {websocket.remote_address}")
     
     async def start_server(self):
