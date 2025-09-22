@@ -333,7 +333,7 @@ class DashScopeRelay:
             # Configure session with generic default instructions that include initial greeting
             default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1�? short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed.
 
-IMPORTANT: Start every conversation by greeting the student warmly and explaining what we're going to practice. Begin with: "Hello! I'm Yuni, your English instructor. Today we're going to practice [scenario]. Are you ready to start?"""""
+CRITICAL: You MUST start the conversation immediately when you receive any input (even "Start the conversation"). Do not wait for the student to speak first. Always begin with: "Hello! I'm Yuni, your English instructor. Today we're going to practice restaurant ordering. Are you ready to start?"""""
 
             # Store the session parameters for future updates
             session_params = {
@@ -350,6 +350,27 @@ IMPORTANT: Start every conversation by greeting the student warmly and explainin
             session_parameters[websocket] = session_params
 
             conversation.update_session(**session_params)
+            
+            # Try to trigger initial AI greeting immediately
+            logger.info("Attempting to trigger initial AI greeting...")
+            try:
+                # Try text-based trigger first
+                conversation.append_text("Start the conversation")
+                logger.info("✅ Sent text trigger for initial greeting")
+            except Exception as e:
+                logger.warning(f"Text trigger failed, trying audio: {e}")
+                try:
+                    # Fallback to silent audio
+                    import base64
+                    import numpy as np
+                    sample_rate = 16000
+                    silence_duration = 0.1
+                    silent_samples = np.zeros(int(sample_rate * silence_duration), dtype=np.int16)
+                    silent_audio_b64 = base64.b64encode(silent_samples.tobytes()).decode('utf-8')
+                    conversation.append_audio(silent_audio_b64)
+                    logger.info("✅ Sent audio trigger for initial greeting")
+                except Exception as e2:
+                    logger.error(f"Both triggers failed: {e2}")
             
             # Send a message to frontend indicating session is ready for initial greeting
             logger.info("Session configured, ready for initial AI greeting")
