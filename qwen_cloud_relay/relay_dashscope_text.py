@@ -632,8 +632,13 @@ class DashScopeCallback(OmniRealtimeCallback):
             # Track AI response start - this indicates a new response
             elif response_type in ['response.start', 'response.audio_transcript.start', 'response.text.start']:
                 logger.info("🔄 AI response started - creating new turn")
-                # Reset AI speaking status to ensure we track this new response
+                # Set AI speaking status to true for new response
                 ai_speaking_status[self.frontend_ws] = True
+            
+            # Track AI response end - reset speaking status
+            elif response_type in ['response.done', 'response.audio_transcript.done', 'response.text.done']:
+                logger.info("🔇 AI response done - resetting speaking status")
+                ai_speaking_status[self.frontend_ws] = False
             
             # Track AI response text - try multiple possible response types
             elif response_type in ['response.audio_transcript.delta', 'response.text.delta']:
@@ -646,18 +651,72 @@ class DashScopeCallback(OmniRealtimeCallback):
                     logger.info("🎤 AI started speaking - user input will be ignored")
                 
                 if ai_text:
-                    # For now, let's create a new turn for each delta to see if that fixes the issue
-                    # This will help us debug what's happening
-                    turn = {
-                        'speaker': 'ai',
-                        'text': ai_text,
-                        'timestamp': int(time.time() * 1000),
-                        'type': 'ai_response'
-                    }
-                    if self.frontend_ws not in conversation_scripts:
-                        conversation_scripts[self.frontend_ws] = []
-                    conversation_scripts[self.frontend_ws].append(turn)
-                    logger.info(f"AI response delta: '{ai_text}'")
+                    # Check if this is a continuation of the current AI response or a new one
+                    current_time = int(time.time() * 1000)
+                    
+                    if (self.frontend_ws in conversation_scripts and 
+                        conversation_scripts[self.frontend_ws] and 
+                        conversation_scripts[self.frontend_ws][-1]['speaker'] == 'ai' and
+                        conversation_scripts[self.frontend_ws][-1]['type'] == 'ai_response'):
+                        
+                        # Check if this is within the same response (within 3 seconds of last update)
+                        last_turn = conversation_scripts[self.frontend_ws][-1]
+                        time_diff = current_time - last_turn['timestamp']
+                        
+                        if time_diff < 3000:  # Within 3 seconds, continue the same response
+                            # Continue existing AI response (concatenate words)
+                            existing_text = last_turn['text']
+                            
+                            # Smart spacing logic
+                            if existing_text:
+                                # Check if we need to add a space
+                                needs_space = (
+                                    not existing_text.endswith(' ') and 
+                                    not existing_text.endswith('.') and 
+                                    not existing_text.endswith(',') and 
+                                    not existing_text.endswith('!') and 
+                                    not existing_text.endswith('?') and 
+                                    not existing_text.endswith(':') and 
+                                    not existing_text.endswith(';') and
+                                    not ai_text.startswith(' ') and
+                                    not ai_text.startswith('.') and
+                                    not ai_text.startswith(',') and
+                                    not ai_text.startswith('!') and
+                                    not ai_text.startswith('?')
+                                )
+                                
+                                if needs_space:
+                                    conversation_scripts[self.frontend_ws][-1]['text'] += ' ' + ai_text
+                                else:
+                                    conversation_scripts[self.frontend_ws][-1]['text'] += ai_text
+                            else:
+                                conversation_scripts[self.frontend_ws][-1]['text'] += ai_text
+                            
+                            # Update timestamp to current time
+                            conversation_scripts[self.frontend_ws][-1]['timestamp'] = current_time
+                            logger.debug(f"Continued AI response: '{ai_text}' -> Total: '{conversation_scripts[self.frontend_ws][-1]['text']}'")
+                        else:
+                            # More than 3 seconds, this is a new response
+                            turn = {
+                                'speaker': 'ai',
+                                'text': ai_text,
+                                'timestamp': current_time,
+                                'type': 'ai_response'
+                            }
+                            conversation_scripts[self.frontend_ws].append(turn)
+                            logger.info(f"New AI response (time gap): '{ai_text}'")
+                    else:
+                        # Start new AI response (new turn)
+                        turn = {
+                            'speaker': 'ai',
+                            'text': ai_text,
+                            'timestamp': current_time,
+                            'type': 'ai_response'
+                        }
+                        if self.frontend_ws not in conversation_scripts:
+                            conversation_scripts[self.frontend_ws] = []
+                        conversation_scripts[self.frontend_ws].append(turn)
+                        logger.info(f"New AI response: '{ai_text}'")
             
             # Also check for complete AI responses
             elif response_type == 'response.audio_transcript.completed':
