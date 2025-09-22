@@ -173,7 +173,7 @@ class DashScopeRelay:
                     
                     # Send the silent audio to trigger conversation
                     conversation.append_audio(silent_audio_b64)
-                    logger.info("�?Triggered initial AI greeting with silent audio")
+                    logger.info("�✅ Triggered initial AI greeting with silent audio")
                     
                 except Exception as e:
                     logger.warning(f"Silent audio trigger failed: {e}")
@@ -192,7 +192,7 @@ class DashScopeRelay:
                         
                         tone_audio_b64 = base64.b64encode(audio_samples.tobytes()).decode('utf-8')
                         conversation.append_audio(tone_audio_b64)
-                        logger.info("�?Triggered initial AI greeting with quiet tone")
+                        logger.info("�✅ Triggered initial AI greeting with quiet tone")
                         
                     except Exception as e2:
                         logger.error(f"All greeting trigger methods failed: {e2}")
@@ -286,7 +286,7 @@ class DashScopeRelay:
                         instructions=new_instructions
                     )
                 
-                logger.info(f"�?Updated instructions for connection {websocket.remote_address}")
+                logger.info(f"�✅ Updated instructions for connection {websocket.remote_address}")
                 logger.debug(f"New instructions: {new_instructions}")
                 
                 # Send confirmation back to frontend
@@ -307,7 +307,7 @@ class DashScopeRelay:
                 logger.warning(f"No conversation found for websocket {websocket.remote_address}")
                 
         except Exception as e:
-            logger.error(f"�?Error handling prompt update: {e}")
+            logger.error(f"�Error handling prompt update: {e}")
             error_response = {
                 "type": "error",
                 "code": "prompt_update_failed",
@@ -338,7 +338,7 @@ class DashScopeRelay:
             # Configure session with generic default instructions that include initial greeting
             default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1�? short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed.
 
-CRITICAL: You MUST start the conversation immediately when you receive any input (even "Start the conversation"). Do not wait for the student to speak first. Always begin with: "Hello! I'm Yuni, your English instructor. Today we're going to practice restaurant ordering. Are you ready to start?"""""
+""""
 
             # Store the session parameters for future updates
             session_params = {
@@ -357,39 +357,6 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
             session_parameters[websocket] = session_params
 
             conversation.update_session(**session_params)
-            
-            # Try to trigger initial AI greeting immediately
-            logger.info("Attempting to trigger initial AI greeting...")
-            try:
-                # Try text-based trigger first
-                conversation.append_text("Start the conversation")
-                logger.info("✅ Sent text trigger for initial greeting")
-            except Exception as e:
-                logger.warning(f"Text trigger failed, trying audio: {e}")
-                try:
-                    # Fallback to silent audio
-                    import base64
-                    import numpy as np
-                    sample_rate = 16000
-                    silence_duration = 0.1
-                    silent_samples = np.zeros(int(sample_rate * silence_duration), dtype=np.int16)
-                    silent_audio_b64 = base64.b64encode(silent_samples.tobytes()).decode('utf-8')
-                    conversation.append_audio(silent_audio_b64)
-                    logger.info("✅ Sent audio trigger for initial greeting")
-                except Exception as e2:
-                    logger.error(f"Both triggers failed: {e2}")
-            
-            # Send a message to frontend indicating session is ready for initial greeting
-            logger.info("Session configured, ready for initial AI greeting")
-            try:
-                await websocket.send(json.dumps({
-                    "type": "session.ready",
-                    "message": "Session is ready, AI can now greet the user",
-                    "ready_for_initial_greeting": True
-                }))
-                logger.info("�?Sent session ready message to frontend")
-            except Exception as e:
-                logger.warning(f"Failed to send session ready message: {e}")
             
             logger.info("Connected to DashScope cloud")
             
@@ -422,7 +389,7 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                                 logger.info("Calling conversation.update_session with preserved parameters...")
                                 
                                 conversation.update_session(**stored_params)
-                                logger.info("�?Successfully updated DashScope session with frontend instructions")
+                                logger.info("✅ Successfully updated DashScope session with frontend instructions")
                                 
                                 # Update stored parameters with new instructions
                                 session_parameters[websocket] = stored_params
@@ -438,7 +405,7 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                                 logger.info("Sent session update confirmation to frontend")
                                 
                             except Exception as e:
-                                logger.error(f"�?Failed to update DashScope session: {e}")
+                                logger.error(f"❌ Failed to update DashScope session: {e}")
                                 error_response = {
                                     "type": "session.update.error",
                                     "success": False,
@@ -477,10 +444,6 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                         # Handle session end - send conversation script
                         logger.info(f"Session end requested from {websocket.remote_address}")
                         await self.handle_session_end(websocket)
-                    elif message_type == 'request.initial_greeting':
-                        # Handle request for initial AI greeting
-                        logger.info(f"Initial greeting requested from {websocket.remote_address}")
-                        await self.handle_initial_greeting_request(websocket)
                     else:
                         logger.info(f"Unhandled message type: {message_type}")
                         
@@ -542,7 +505,7 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                     h["cache-control"] = "no-store"
                     return make_response(http.HTTPStatus.OK, h, body)
 
-                # 2) WebSocket endpoint on "/" �?DO NOT return an HTTP response.
+                # 2) WebSocket endpoint on "/" - DO NOT return an HTTP response.
                 # Returning None tells websockets to continue the WS handshake.
                 if path == "/":
                     # If it's a true WS handshake, proceed:
@@ -550,7 +513,7 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                     # up = (request.headers.get("upgrade") or request.headers.get("Upgrade") or "").lower()
                     # if up == "websocket":
                     #     return None
-                    return None  # <�?let WS handshake happen
+                    return None  # <?let WS handshake happen
 
                 # 3) Any other plain HTTP paths: hint upgrade
                 h = Headers()
@@ -578,7 +541,7 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
             process_request=process_request
         )
         
-        logger.info(f"�?DashScope relay server running on ws://localhost:{self.port}")
+        logger.info(f"�🚀 DashScope relay server running on ws://localhost:{self.port}")
         logger.info("Ready to relay connections to DashScope cloud")
         
         # Keep server running
@@ -665,11 +628,12 @@ class DashScopeCallback(OmniRealtimeCallback):
                     logger.info("🎤 AI started speaking - user input will be ignored")
                 
                 if ai_text:
-                    # Check if this is a new response or continuation
+                    # Check if this is a new response or continuation of current response
                     if (self.frontend_ws in conversation_scripts and 
                         conversation_scripts[self.frontend_ws] and 
-                        conversation_scripts[self.frontend_ws][-1]['speaker'] == 'ai'):
-                        # Append to existing AI turn with better word boundary handling
+                        conversation_scripts[self.frontend_ws][-1]['speaker'] == 'ai' and
+                        conversation_scripts[self.frontend_ws][-1]['type'] == 'ai_response'):
+                        # Continue existing AI response (same turn)
                         existing_text = conversation_scripts[self.frontend_ws][-1]['text']
                         
                         # Smart spacing logic
@@ -697,9 +661,9 @@ class DashScopeCallback(OmniRealtimeCallback):
                         else:
                             conversation_scripts[self.frontend_ws][-1]['text'] += ai_text
                         
-                        logger.info(f"Appended AI response: '{ai_text}' -> Total: '{conversation_scripts[self.frontend_ws][-1]['text']}'")
+                        logger.debug(f"Continued AI response: '{ai_text}' -> Total: '{conversation_scripts[self.frontend_ws][-1]['text']}'")
                     else:
-                        # Create new AI turn
+                        # Start new AI response (new turn)
                         turn = {
                             'speaker': 'ai',
                             'text': ai_text,
@@ -763,7 +727,7 @@ async def main():
     
     # Check API key
     if not DASHSCOPE_API_KEY or DASHSCOPE_API_KEY == 'sk-your-api-key-here':
-        logger.error("�?DASHSCOPE_API_KEY not set!")
+        logger.error("❌ DASHSCOPE_API_KEY not set!")
         logger.error("Please set DASHSCOPE_API_KEY in your .env file")
         sys.exit(1)
     
