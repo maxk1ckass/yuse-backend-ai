@@ -150,6 +150,85 @@ class DashScopeRelay:
         except Exception as e:
             logger.error(f"Error handling session end: {e}")
     
+    async def handle_initial_greeting_request(self, websocket):
+        """Handle request for initial AI greeting"""
+        try:
+            if websocket in dashscope_conversations:
+                conversation = dashscope_conversations[websocket]
+                logger.info("Triggering initial AI greeting...")
+                
+                try:
+                    # Method 1: Send a very short silent audio chunk to trigger conversation
+                    import base64
+                    import numpy as np
+                    
+                    # Create a minimal silent audio chunk (50ms of silence)
+                    sample_rate = 16000
+                    silence_duration = 0.05  # 50ms
+                    silent_samples = np.zeros(int(sample_rate * silence_duration), dtype=np.int16)
+                    silent_audio_b64 = base64.b64encode(silent_samples.tobytes()).decode('utf-8')
+                    
+                    # Send the silent audio to trigger conversation
+                    conversation.append_audio(silent_audio_b64)
+                    logger.info("✅ Triggered initial AI greeting with silent audio")
+                    
+                except Exception as e:
+                    logger.warning(f"Silent audio trigger failed: {e}")
+                    
+                    # Method 2: Try to send a minimal audio signal
+                    try:
+                        # Create a very quiet tone (not silence) to trigger the AI
+                        import numpy as np
+                        
+                        sample_rate = 16000
+                        duration = 0.1  # 100ms
+                        frequency = 440  # A note
+                        t = np.linspace(0, duration, int(sample_rate * duration))
+                        tone = np.sin(2 * np.pi * frequency * t) * 0.01  # Very quiet
+                        audio_samples = (tone * 32767).astype(np.int16)
+                        
+                        tone_audio_b64 = base64.b64encode(audio_samples.tobytes()).decode('utf-8')
+                        conversation.append_audio(tone_audio_b64)
+                        logger.info("✅ Triggered initial AI greeting with quiet tone")
+                        
+                    except Exception as e2:
+                        logger.error(f"All greeting trigger methods failed: {e2}")
+                        
+                        # Send error response to frontend
+                        await websocket.send(json.dumps({
+                            "type": "initial_greeting.error",
+                            "success": False,
+                            "message": "Failed to trigger initial greeting"
+                        }))
+                        return
+                
+                # Send success response to frontend
+                await websocket.send(json.dumps({
+                    "type": "initial_greeting.triggered",
+                    "success": True,
+                    "message": "Initial greeting triggered"
+                }))
+                logger.info("Sent initial greeting trigger confirmation to frontend")
+                
+            else:
+                logger.warning(f"No conversation found for websocket {websocket.remote_address}")
+                await websocket.send(json.dumps({
+                    "type": "initial_greeting.error",
+                    "success": False,
+                    "message": "No active conversation found"
+                }))
+                
+        except Exception as e:
+            logger.error(f"Error handling initial greeting request: {e}")
+            try:
+                await websocket.send(json.dumps({
+                    "type": "initial_greeting.error",
+                    "success": False,
+                    "message": f"Error triggering initial greeting: {str(e)}"
+                }))
+            except:
+                pass
+    
     async def handle_prompt_update(self, websocket, prompt_data: Dict[str, Any]):
         """Handle prompt update message"""
         try:
@@ -251,8 +330,10 @@ class DashScopeRelay:
             dashscope_conversations[websocket] = conversation
             logger.info("Successfully connected to DashScope")
             
-            # Configure session with generic default instructions
-            default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed."""
+            # Configure session with generic default instructions that include initial greeting
+            default_instructions = """You are Yuni, a friendly English instructor helping students practicing dialogue roleplay in real life scenarios. Be encouraging and provide gentle corrections when needed. Turn-taking: reply in 1–2 short sentences, then stop so the student can speak. Be encouraging; if needed, give tiny inline corrections in brackets. Keep vocabulary beginner level, natural and conversational. Adapt your role based on the conversation context as needed.
+
+IMPORTANT: Start every conversation by greeting the student warmly and explaining what we're going to practice. Begin with: "Hello! I'm Yuni, your English instructor. Today we're going to practice [scenario]. Are you ready to start?""""
 
             # Store the session parameters for future updates
             session_params = {
@@ -269,6 +350,18 @@ class DashScopeRelay:
             session_parameters[websocket] = session_params
 
             conversation.update_session(**session_params)
+            
+            # Send a message to frontend indicating session is ready for initial greeting
+            logger.info("Session configured, ready for initial AI greeting")
+            try:
+                await websocket.send(json.dumps({
+                    "type": "session.ready",
+                    "message": "Session is ready, AI can now greet the user",
+                    "ready_for_initial_greeting": True
+                }))
+                logger.info("✅ Sent session ready message to frontend")
+            except Exception as e:
+                logger.warning(f"Failed to send session ready message: {e}")
             
             logger.info("Connected to DashScope cloud")
             
@@ -356,6 +449,10 @@ class DashScopeRelay:
                         # Handle session end - send conversation script
                         logger.info(f"Session end requested from {websocket.remote_address}")
                         await self.handle_session_end(websocket)
+                    elif message_type == 'request.initial_greeting':
+                        # Handle request for initial AI greeting
+                        logger.info(f"Initial greeting requested from {websocket.remote_address}")
+                        await self.handle_initial_greeting_request(websocket)
                     else:
                         logger.info(f"Unhandled message type: {message_type}")
                         
