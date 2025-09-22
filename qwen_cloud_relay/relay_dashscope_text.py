@@ -53,6 +53,9 @@ conversation_scripts: Dict[Any, list] = {}  # Store conversation turns per conne
 # Store session parameters per connection to preserve them during updates
 session_parameters: Dict[Any, Dict[str, Any]] = {}  # Store session config per connection
 
+# Track AI speaking status per connection for turn-by-turn enforcement
+ai_speaking_status: Dict[Any, bool] = {}  # Track if AI is currently speaking
+
 class DashScopeRelay:
     def __init__(self):
         self.port = int(os.getenv('RELAY_PORT', 8001))  # Different from FastRTC (8000)
@@ -278,6 +281,8 @@ class DashScopeRelay:
                         input_audio_transcription_model='gummy-realtime-v1',
                         enable_turn_detection=True,
                         turn_detection_type='server_vad',
+                        turn_detection_silence_duration_ms=2000,  # Increased silence duration
+                        turn_detection_max_silence_duration_ms=5000,  # Max silence before forcing turn end
                         instructions=new_instructions
                     )
                 
@@ -345,6 +350,8 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                 'input_audio_transcription_model': 'gummy-realtime-v1',
                 'enable_turn_detection': True,
                 'turn_detection_type': 'server_vad',
+                'turn_detection_silence_duration_ms': 2000,  # Increased from default to 2 seconds
+                'turn_detection_max_silence_duration_ms': 3000,  # Max silence before forcing turn end
                 'instructions': default_instructions
             }
             session_parameters[websocket] = session_params
@@ -496,6 +503,8 @@ CRITICAL: You MUST start the conversation immediately when you receive any input
                 del conversation_scripts[websocket]
             if websocket in session_parameters:
                 del session_parameters[websocket]
+            if websocket in ai_speaking_status:
+                del ai_speaking_status[websocket]
             logger.info(f"Frontend disconnected: {websocket.remote_address}")
     
     async def start_server(self):
@@ -616,6 +625,24 @@ class DashScopeCallback(OmniRealtimeCallback):
             if response_type == 'conversation.item.input_audio_transcription.completed':
                 transcript = response.get('transcript', '').strip()
                 if transcript:
+                    # Check if AI is currently speaking - if so, ignore user input
+                    if ai_speaking_status.get(self.frontend_ws, False):
+                        logger.info(f"🚫 Ignoring user speech while AI is speaking: '{transcript}'")
+                        # Send ignored speech notification to frontend
+                        ignored_message = {
+                            "type": "speech.ignored",
+                            "text": transcript,
+                            "reason": "AI is currently speaking",
+                            "timestamp": int(time.time() * 1000)
+                        }
+                        if self.event_loop and not self.event_loop.is_closed():
+                            asyncio.run_coroutine_threadsafe(
+                                self.frontend_ws.send(json.dumps(ignored_message)), 
+                                self.event_loop
+                            )
+                        return
+                    
+                    # AI is not speaking, process user speech normally
                     turn = {
                         'speaker': 'user',
                         'text': transcript,
@@ -631,6 +658,11 @@ class DashScopeCallback(OmniRealtimeCallback):
             elif response_type in ['response.audio_transcript.delta', 'response.text.delta']:
                 ai_text = response.get('delta', '').strip()
                 logger.debug(f"AI text delta: '{ai_text}' (length: {len(ai_text)})")
+                
+                # Mark AI as speaking when we start receiving response deltas
+                if ai_text and not ai_speaking_status.get(self.frontend_ws, False):
+                    ai_speaking_status[self.frontend_ws] = True
+                    logger.info("🎤 AI started speaking - user input will be ignored")
                 
                 if ai_text:
                     # Check if this is a new response or continuation
@@ -684,6 +716,10 @@ class DashScopeCallback(OmniRealtimeCallback):
                 complete_text = response.get('transcript', '').strip()
                 if complete_text:
                     logger.info(f"Complete AI transcript: '{complete_text}'")
+                    
+                    # Mark AI as finished speaking
+                    ai_speaking_status[self.frontend_ws] = False
+                    logger.info("🔇 AI finished speaking - user input is now accepted")
                     # Use the complete transcript instead of delta chunks
                     if (self.frontend_ws in conversation_scripts and 
                         conversation_scripts[self.frontend_ws] and 
