@@ -152,6 +152,53 @@ class DashScopeRelay:
                 
         except Exception as e:
             logger.error(f"Error handling session end: {e}")
+
+    async def extend_dashscope_session(self, websocket):
+        """Extend DashScope session to prevent timeout"""
+        try:
+            if websocket in dashscope_conversations:
+                conversation = dashscope_conversations[websocket]
+                # Send a ping message to extend the session
+                conversation.send({
+                    "type": "session.ping",
+                    "timestamp": int(time.time() * 1000)
+                })
+                logger.info(f"Extended DashScope session for {websocket.remote_address}")
+        except Exception as e:
+            logger.error(f"Error extending DashScope session: {e}")
+            # If extension fails, try to reconnect
+            try:
+                if websocket in dashscope_conversations:
+                    conversation = dashscope_conversations[websocket]
+                    conversation.close()
+                    del dashscope_conversations[websocket]
+                    
+                    # Notify frontend of reconnection
+                    reconnect_message = {
+                        "type": "connection.reconnecting",
+                        "reason": "Session expired, reconnecting...",
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    await websocket.send(json.dumps(reconnect_message))
+                    
+                    # Reconnect to DashScope
+                    await self.handle_frontend_connection(websocket)
+            except Exception as reconnect_error:
+                logger.error(f"Error reconnecting DashScope session: {reconnect_error}")
+
+    async def session_extension_task(self):
+        """Background task to extend DashScope sessions every 5 minutes"""
+        while True:
+            try:
+                await asyncio.sleep(300)  # Wait 5 minutes
+                
+                # Extend sessions for all active connections
+                for websocket in list(active_connections):
+                    if websocket in dashscope_conversations:
+                        await self.extend_dashscope_session(websocket)
+                        
+            except Exception as e:
+                logger.error(f"Error in session extension task: {e}")
     
     async def handle_initial_greeting_request(self, websocket):
         """Handle request for initial AI greeting"""
@@ -262,12 +309,12 @@ class DashScopeRelay:
                 logger.info("Updating DashScope conversation with new instructions...")
                 
                 if websocket in session_parameters:
-                    # Use stored session parameters and only update instructions
+                    # Update only the instructions to avoid parameter conflicts
+                    logger.info("Updating session with instructions only")
+                    conversation.update_session(instructions=new_instructions)
+                    # Update stored parameters
                     stored_params = session_parameters[websocket].copy()
                     stored_params['instructions'] = new_instructions
-                    logger.info(f"Updating with stored parameters: {list(stored_params.keys())}")
-                    conversation.update_session(**stored_params)
-                    # Update stored parameters
                     session_parameters[websocket] = stored_params
                 else:
                     # Fallback to default parameters (shouldn't happen in normal flow)
@@ -383,14 +430,14 @@ class DashScopeRelay:
                             logger.info(f"Stored session parameters: {list(stored_params.keys())}")
                             
                             try:
-                                # Update only the instructions while preserving all other parameters
-                                stored_params['instructions'] = frontend_instructions
-                                logger.info("Calling conversation.update_session with preserved parameters...")
+                                # Update only the instructions - avoid passing other parameters that might cause issues
+                                logger.info("Calling conversation.update_session with instructions only...")
                                 
-                                conversation.update_session(**stored_params)
+                                conversation.update_session(instructions=frontend_instructions)
                                 logger.info("✅ Successfully updated DashScope session with frontend instructions")
                                 
                                 # Update stored parameters with new instructions
+                                stored_params['instructions'] = frontend_instructions
                                 session_parameters[websocket] = stored_params
                                 
                                 # Send confirmation back to frontend
@@ -420,6 +467,17 @@ class DashScopeRelay:
                         # Forward audio data to DashScope - but check if AI is speaking first
                         audio_b64 = data.get('audio')
                         if audio_b64:
+                            # Check if DashScope connection is still active
+                            if websocket not in dashscope_conversations:
+                                logger.warning(f"🚫 Ignoring audio - DashScope connection not found for {websocket.remote_address}")
+                                error_message = {
+                                    "type": "connection.error",
+                                    "reason": "DashScope connection lost",
+                                    "timestamp": int(time.time() * 1000)
+                                }
+                                await websocket.send(json.dumps(error_message))
+                                continue
+                            
                             # Check if AI is currently speaking - if so, ignore user audio
                             if ai_speaking_status.get(websocket, False):
                                 logger.info(f"🚫 Ignoring user audio while AI is speaking (blocked at DashScope level)")
@@ -433,7 +491,17 @@ class DashScopeRelay:
                                 continue  # Skip sending to DashScope
                             
                             # AI is not speaking, process audio normally
-                            conversation.append_audio(audio_b64)
+                            try:
+                                conversation.append_audio(audio_b64)
+                            except Exception as e:
+                                logger.error(f"Error sending audio to DashScope: {e}")
+                                # Notify frontend of the error
+                                error_message = {
+                                    "type": "connection.error",
+                                    "reason": f"Failed to send audio: {str(e)}",
+                                    "timestamp": int(time.time() * 1000)
+                                }
+                                await websocket.send(json.dumps(error_message))
                     elif message_type == 'control.prompt.update':
                         # Handle prompt update
                         prompt_data = data.get('prompt', {})
@@ -461,8 +529,23 @@ class DashScopeRelay:
                         
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON from frontend: {message}")
+                    error_message = {
+                        "type": "error",
+                        "message": "Invalid JSON format",
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    await websocket.send(json.dumps(error_message))
                 except Exception as e:
                     logger.error(f"Error processing frontend message: {e}")
+                    error_message = {
+                        "type": "error", 
+                        "message": f"Backend error: {str(e)}",
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    try:
+                        await websocket.send(json.dumps(error_message))
+                    except:
+                        logger.error("Failed to send error message to frontend")
             
         except Exception as e:
             logger.error(f"Error handling frontend connection: {e}")
@@ -556,6 +639,9 @@ class DashScopeRelay:
         logger.info(f"�🚀 DashScope relay server running on ws://localhost:{self.port}")
         logger.info("Ready to relay connections to DashScope cloud")
         
+        # Start background task for session extension
+        asyncio.create_task(self.session_extension_task())
+        
         # Keep server running
         await server.wait_closed()
 
@@ -564,15 +650,31 @@ class DashScopeCallback(OmniRealtimeCallback):
     def __init__(self, frontend_websocket, event_loop):
         self.frontend_ws = frontend_websocket
         self.event_loop = event_loop
+        self.connection_closed = False
         
     def on_open(self) -> None:
         logger.info("DashScope connection opened")
+        self.connection_closed = False
         
     def on_close(self, close_status_code, close_msg) -> None:
         logger.info(f"DashScope connection closed: {close_status_code}, {close_msg}")
+        self.connection_closed = True
+        
+        # Notify frontend that DashScope connection was lost
+        if self.event_loop and not self.event_loop.is_closed():
+            disconnect_message = {
+                "type": "connection.lost",
+                "reason": f"DashScope connection closed: {close_status_code}",
+                "timestamp": int(time.time() * 1000)
+            }
+            asyncio.run_coroutine_threadsafe(
+                self.send_to_frontend(disconnect_message), 
+                self.event_loop
+            )
         
     def on_error(self, error) -> None:
         logger.error(f"DashScope connection error: {error}")
+        self.connection_closed = True
         
     def on_event(self, response: dict) -> None:
         try:
@@ -753,8 +855,10 @@ class DashScopeCallback(OmniRealtimeCallback):
     async def send_to_frontend(self, response: dict):
         """Send DashScope response to frontend"""
         try:
-            if self.frontend_ws:
+            if self.frontend_ws and not self.connection_closed:
                 await self.frontend_ws.send(json.dumps(response))
+            elif self.connection_closed:
+                logger.debug("Not sending to frontend - DashScope connection is closed")
         except Exception as e:
             logger.error(f"Error sending to frontend: {e}")
 
