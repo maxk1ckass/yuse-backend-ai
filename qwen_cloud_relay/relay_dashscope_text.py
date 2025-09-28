@@ -495,13 +495,34 @@ class DashScopeRelay:
                         if audio_b64:
                             # Check if DashScope connection is still active
                             if websocket not in dashscope_conversations:
-                                logger.warning(f"🚫 Ignoring audio - DashScope connection not found for {websocket.remote_address}")
-                                error_message = {
-                                    "type": "connection.error",
-                                    "reason": "DashScope connection lost",
-                                    "timestamp": int(time.time() * 1000)
-                                }
-                                await websocket.send(json.dumps(error_message))
+                                logger.warning(f"🚫 DashScope connection not found for {websocket.remote_address}, attempting to reconnect...")
+                                
+                                # Attempt to reconnect DashScope
+                                try:
+                                    await self.handle_frontend_connection(websocket)
+                                    logger.info(f"✅ Successfully reconnected DashScope for {websocket.remote_address}")
+                                    
+                                    # Retry sending the audio after reconnection
+                                    if websocket in dashscope_conversations:
+                                        conversation = dashscope_conversations[websocket]
+                                        conversation.append_audio(audio_b64)
+                                        logger.info(f"📤 Audio sent to DashScope after reconnection")
+                                    else:
+                                        logger.error(f"❌ Failed to reconnect DashScope for {websocket.remote_address}")
+                                        error_message = {
+                                            "type": "connection.error",
+                                            "reason": "Failed to reconnect to DashScope",
+                                            "timestamp": int(time.time() * 1000)
+                                        }
+                                        await websocket.send(json.dumps(error_message))
+                                except Exception as reconnect_error:
+                                    logger.error(f"❌ Failed to reconnect DashScope: {reconnect_error}")
+                                    error_message = {
+                                        "type": "connection.error",
+                                        "reason": "Failed to reconnect to DashScope",
+                                        "timestamp": int(time.time() * 1000)
+                                    }
+                                    await websocket.send(json.dumps(error_message))
                                 continue
                             
                             # Check if AI is currently speaking - if so, ignore user audio
