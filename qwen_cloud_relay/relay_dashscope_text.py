@@ -309,12 +309,26 @@ class DashScopeRelay:
                 logger.info("Updating DashScope conversation with new instructions...")
                 
                 if websocket in session_parameters:
-                    # Update only the instructions to avoid parameter conflicts
-                    logger.info("Updating session with instructions only")
-                    conversation.update_session(instructions=new_instructions)
-                    # Update stored parameters
+                    # Update session with all required parameters
                     stored_params = session_parameters[websocket].copy()
                     stored_params['instructions'] = new_instructions
+                    
+                    logger.info("Updating session with all parameters including new instructions")
+                    conversation.update_session(
+                        output_modalities=stored_params.get('output_modalities', [MultiModality.AUDIO, MultiModality.TEXT]),
+                        voice=stored_params.get('voice', 'Chelsie'),
+                        input_audio_format=stored_params.get('input_audio_format', AudioFormat.PCM_16000HZ_MONO_16BIT),
+                        output_audio_format=stored_params.get('output_audio_format', AudioFormat.PCM_24000HZ_MONO_16BIT),
+                        enable_input_audio_transcription=stored_params.get('enable_input_audio_transcription', True),
+                        input_audio_transcription_model=stored_params.get('input_audio_transcription_model', 'gummy-realtime-v1'),
+                        enable_turn_detection=stored_params.get('enable_turn_detection', True),
+                        turn_detection_type=stored_params.get('turn_detection_type', 'server_vad'),
+                        turn_detection_silence_duration_ms=stored_params.get('turn_detection_silence_duration_ms', 2000),
+                        turn_detection_max_silence_duration_ms=stored_params.get('turn_detection_max_silence_duration_ms', 5000),
+                        instructions=new_instructions
+                    )
+                    
+                    # Update stored parameters
                     session_parameters[websocket] = stored_params
                 else:
                     # Fallback to default parameters (shouldn't happen in normal flow)
@@ -430,10 +444,22 @@ class DashScopeRelay:
                             logger.info(f"Stored session parameters: {list(stored_params.keys())}")
                             
                             try:
-                                # Update only the instructions - avoid passing other parameters that might cause issues
-                                logger.info("Calling conversation.update_session with instructions only...")
+                                # Update session with all required parameters including new instructions
+                                logger.info("Calling conversation.update_session with all parameters...")
                                 
-                                conversation.update_session(instructions=frontend_instructions)
+                                conversation.update_session(
+                                    output_modalities=stored_params.get('output_modalities', [MultiModality.AUDIO, MultiModality.TEXT]),
+                                    voice=stored_params.get('voice', 'Chelsie'),
+                                    input_audio_format=stored_params.get('input_audio_format', AudioFormat.PCM_16000HZ_MONO_16BIT),
+                                    output_audio_format=stored_params.get('output_audio_format', AudioFormat.PCM_24000HZ_MONO_16BIT),
+                                    enable_input_audio_transcription=stored_params.get('enable_input_audio_transcription', True),
+                                    input_audio_transcription_model=stored_params.get('input_audio_transcription_model', 'gummy-realtime-v1'),
+                                    enable_turn_detection=stored_params.get('enable_turn_detection', True),
+                                    turn_detection_type=stored_params.get('turn_detection_type', 'server_vad'),
+                                    turn_detection_silence_duration_ms=stored_params.get('turn_detection_silence_duration_ms', 2000),
+                                    turn_detection_max_silence_duration_ms=stored_params.get('turn_detection_max_silence_duration_ms', 5000),
+                                    instructions=frontend_instructions
+                                )
                                 logger.info("✅ Successfully updated DashScope session with frontend instructions")
                                 
                                 # Update stored parameters with new instructions
