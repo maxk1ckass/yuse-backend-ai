@@ -502,19 +502,18 @@ class DashScopeRelay:
                                     await self.handle_frontend_connection(websocket)
                                     logger.info(f"✅ Successfully reconnected DashScope for {websocket.remote_address}")
                                     
-                                    # Retry sending the audio after reconnection
-                                    if websocket in dashscope_conversations:
-                                        conversation = dashscope_conversations[websocket]
-                                        conversation.append_audio(audio_b64)
-                                        logger.info(f"📤 Audio sent to DashScope after reconnection")
-                                    else:
-                                        logger.error(f"❌ Failed to reconnect DashScope for {websocket.remote_address}")
-                                        error_message = {
-                                            "type": "connection.error",
-                                            "reason": "Failed to reconnect to DashScope",
-                                            "timestamp": int(time.time() * 1000)
-                                        }
-                                        await websocket.send(json.dumps(error_message))
+                                    # Send reconnection notification to frontend
+                                    reconnected_message = {
+                                        "type": "connection.reconnected",
+                                        "reason": "DashScope connection restored",
+                                        "timestamp": int(time.time() * 1000)
+                                    }
+                                    await websocket.send(json.dumps(reconnected_message))
+                                    
+                                    # Note: We don't retry the audio here to avoid duplicates
+                                    # The frontend will continue sending audio in real-time
+                                    logger.info(f"📤 DashScope reconnected, ready for new audio")
+                                    
                                 except Exception as reconnect_error:
                                     logger.error(f"❌ Failed to reconnect DashScope: {reconnect_error}")
                                     error_message = {
@@ -777,6 +776,18 @@ class DashScopeCallback(OmniRealtimeCallback):
                         conversation_scripts[self.frontend_ws] = []
                     conversation_scripts[self.frontend_ws].append(turn)
                     logger.info(f"Tracked user speech: '{transcript}'")
+                    
+                    # Send transcript back to frontend
+                    transcript_message = {
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "transcript": transcript,
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    if self.event_loop and not self.event_loop.is_closed():
+                        asyncio.run_coroutine_threadsafe(
+                            self.frontend_ws.send(json.dumps(transcript_message)), 
+                            self.event_loop
+                        )
             
             # Track AI response start - this indicates a new response
             elif response_type in ['response.start', 'response.audio_transcript.start', 'response.text.start']:
